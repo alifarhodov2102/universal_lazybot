@@ -9,8 +9,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("PDFEngine")
 
-# AGAR WINDOWSDA BO'LSANGIZ, TESSERACT YO'LINI KO'RSATING:
-# pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+
 
 def extract_text_sync(pdf_path: str) -> str:
     """

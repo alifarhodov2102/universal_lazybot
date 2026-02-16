@@ -1,39 +1,37 @@
 from jinja2 import Template, exceptions
 import re
 
-# Standart format: Google Maps va Mileage qo'shildi
+# Alice's minimalist template: No more Google Maps, just clean data 💅
 DEFAULT_TEMPLATE = """
-{{ broker }}
+<b>{{ broker }}</b>
 
-Load# {{ load_number }}
+<b>Load#</b> {{ load_number }}
 
 {% for p in pickups -%}
-PU{{ loop.index }}: {{ p.facility }}
+<b>PU{{ loop.index }}:</b> {{ p.facility }}
 {{ p.address }}
-📍 [Google Maps](https://www.google.com/maps/search/?api=1&query={{ p.address|replace(' ', '+')|replace('\n', '+') }})
-{% if p.time %}TIME: {{ p.time }}{% endif %}
+{% if p.time %}<b>TIME:</b> {{ p.time }}{% endif %}
 {% endfor %}
-
+—————————————
 {% for d in deliveries -%}
-DEL{{ loop.index }}: {{ d.facility }}
+<b>DEL{{ loop.index }}:</b> {{ d.facility }}
 {{ d.address }}
-📍 [Google Maps](https://www.google.com/maps/search/?api=1&query={{ d.address|replace(' ', '+')|replace('\n', '+') }})
-{% if d.time %}TIME: {{ d.time }}{% endif %}
+{% if d.time %}<b>TIME:</b> {{ d.time }}{% endif %}
 {% endfor %}
 
-TOTAL MILES: {{ total_miles }}
-RATE: {{ rate }}
+<b>TOTAL MILES:</b> {{ total_miles }}
+<b>RATE:</b> {{ rate }}
 """
 
 def _format_address(addr: str) -> str:
     """
-    Manzilni chiroyli ko'rinishga keltirish.
+    Alice formats the address so it's not a giant mess.
     """
     if not addr:
         return ""
     addr = addr.strip()
     
-    # Bir qatorli manzillarni o'qish qulay bo'lishi uchun bo'laklaymiz
+    # Splitting long one-liners into readable parts for better UX
     if "\n" not in addr and addr.count(",") >= 2:
         parts = addr.split(",", 1)
         return f"{parts[0].strip()},\n{parts[1].strip()}"
@@ -42,15 +40,14 @@ def _format_address(addr: str) -> str:
 
 def render_result(data: dict, user_template: str = None) -> str:
     """
-    Extractor'dan kelgan JSON ma'lumotlarini Jinja2 shabloni orqali 
-    tayyor matnga aylantiradi.
+    Converts JSON data from the extractor into a sassy yet clean text format 🥱.
     """
-    # 1. Ma'lumotlarni tozalash va tayyorlash
+    # 1. Clean and prepare the data
     clean_data = {
-        "broker": (data.get("broker") or "N/A").strip(),
+        "broker": (data.get("broker") or "Rate Confirmation").strip(),
         "load_number": (data.get("load_number") or "N/A").strip(),
         "rate": (data.get("rate") or "N/A").strip(),
-        "total_miles": (data.get("total_miles") or "N/A"), # Masofa qo'shildi
+        "total_miles": (data.get("total_miles") or "N/A"),
         "pickups": [
             {
                 "facility": (p.get("facility") or "").strip(),
@@ -67,16 +64,16 @@ def render_result(data: dict, user_template: str = None) -> str:
         ]
     }
 
-    # 2. Shablonni tanlash
+    # 2. Select the template
     tmpl_str = user_template if user_template else DEFAULT_TEMPLATE
 
     try:
-        # 3. Render qilish
+        # 3. Render with HTML support for Telegram 💅
         template = Template(tmpl_str)
         rendered_text = template.render(**clean_data)
         
-        # Ortiqcha bo'sh qatorlarni tozalash
+        # Clean up triple newlines and return the clean result
         return re.sub(r'\n{3,}', '\n\n', rendered_text).strip()
     
     except exceptions.TemplateError as e:
-        return f"⚠️ Shablonda xatolik bor: {str(e)}\n\nIltimos, sozlamalarni tekshiring."
+        return f"⚠️ <b>Template Error:</b> {str(e)}\n\nPlease check your settings, honey."
