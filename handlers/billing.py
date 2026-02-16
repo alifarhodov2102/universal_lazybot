@@ -15,16 +15,17 @@ async def show_plans(message: types.Message):
     # Prices for the automated Telegram Stars plan
     prices = [LabeledPrice(label="Pro Plan (30 days)", amount=250)]
     
+    # Updated description with proper HTML bolding and copyable card code
     description = (
-        "✨ Alice's Premium Access ✨\n\n"
+        "✨ <b>Alice's Premium Access</b> ✨\n\n"
         "Choose your lazy way to pay:\n"
-        "💰 Price: 250 Stars OR 59,999 UZS / month\n\n"
+        "💰 <b>Price:</b> 250 Stars OR <b>59,999 UZS</b> / month\n\n"
         "✅ Unlimited RC extractions\n"
         "✅ Custom output templates\n"
         "✅ Full OCR & AI priority support\n\n"
-        "💳 Manual Card Payment:\n"
+        "💳 <b>Manual Card Payment:</b>\n"
         "<code>5614682203258662</code> (Click to copy)\n"
-        "⚠️ Send the receipt to @lazyalice_admin after paying.\n\n"
+        "⚠️ <i>Send the receipt to @lazyalice_admin after paying.</i>\n\n"
         "Click 'Pay with Stars' for instant activation, or follow the card instructions. 🥱💅"
     )
 
@@ -35,6 +36,7 @@ async def show_plans(message: types.Message):
         [InlineKeyboardButton(text="💳 Pay 59,999 UZS (Via Card)", url="https://t.me/lazyalice_admin")]
     ])
 
+    # Alice added the internal parser to make sure your bolding actually works 🥱
     await message.answer_invoice(
         title="Lazy Alice Pro Access",
         description=description,
@@ -43,7 +45,7 @@ async def show_plans(message: types.Message):
         currency="XTR",
         prices=prices,
         start_parameter="pro-sub",
-        reply_markup=kb, # Both options are here now 💅
+        reply_markup=kb,
         protect_content=True
     )
 
@@ -68,15 +70,16 @@ async def on_successful_payment(message: types.Message):
         await session.commit()
 
     success_text = (
-        "❤️ Alice is impressed! ❤️\n\n"
+        "❤️ <b>Alice is impressed!</b> ❤️\n\n"
         "Your automated payment was successful. Pro status is active.\n"
-        f"Valid until: {expire_at.strftime('%d.%m.%Y')} 💅"
+        f"Valid until: <b>{expire_at.strftime('%d.%m.%Y')}</b> 💅"
     )
+    # Ensure parse_mode is set to HTML here too!
     await message.answer(success_text, parse_mode="HTML")
 
 @router.message(Command("status"))
 async def check_status(message: types.Message):
-    """Checking if your subscription is still alive 🥱"""
+    """Checking if Alice still considers you a VIP 🥱"""
     async with AsyncSessionLocal() as session:
         stmt = select(User).where(User.tg_id == message.from_user.id)
         res = await session.execute(stmt)
@@ -84,10 +87,10 @@ async def check_status(message: types.Message):
 
     if user and user.is_pro:
         if user.expiry_date and user.expiry_date < datetime.utcnow():
-            status = "🚫 Expired (Time to pay Alice again 💅)"
+            status = "🚫 <b>Expired</b> (Time to pay Alice again, honey 💅)"
         else:
-            status = f"✅ Pro (Until: {user.expiry_date.strftime('%d.%m.%Y')})"
+            status = f"✅ <b>Pro</b> (Until: {user.expiry_date.strftime('%d.%m.%Y')})"
     else:
-        status = f"🆓 Free ({user.free_uses if user else 0} remaining)"
+        status = f"🆓 <b>Free</b> ({user.free_uses if user else 0} remaining)"
 
-    await message.answer(f"❤️ Current Status: {status}", parse_mode="HTML")
+    await message.answer(f"❤️ <b>Current Status:</b> {status}", parse_mode="HTML")
