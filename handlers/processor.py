@@ -5,6 +5,8 @@ import random
 from aiogram import Router, types, F, Bot
 from sqlalchemy import select, update
 from aiogram.exceptions import TelegramBadRequest
+# Professional logic requires correct enum usage 🥱
+from aiogram.enums import ParseMode
 
 from database.connection import AsyncSessionLocal
 from database.models import User
@@ -85,11 +87,15 @@ async def process_user_queue(uid: int, bot: Bot):
                     data = await ai_task
                     await safe_edit_status(bot, chat_id, msg_id, "✨ Finally! Here it is. [100%]")
 
-                    # 4. Rendering (Removed the 'Thank me later' line)
+                    # 4. Rendering (Fixed to match our HTML renderer) 💅
                     formatted_output = render_result(data, user.template_text if user else None)
                     
-                    # Alice just sends the result now without extra sassy footer
-                    await bot.send_message(chat_id, formatted_output, parse_mode="Markdown")
+                    # TUZATISH: Endi bu Markdown emas, HTML!
+                    await bot.send_message(
+                        chat_id, 
+                        formatted_output, 
+                        parse_mode=ParseMode.HTML # This makes <b> tags work 💅
+                    )
 
                     # 5. Limit management
                     if uid not in ADMIN_IDS and user and not user.is_pro:
@@ -152,4 +158,5 @@ async def sassy_chat(message: types.Message):
         "🥱 Talking is exhausting. Just send the Rate Confirmation already.",
         "🚫 Too many words, not enough PDF. Move along, honey."
     ]
-    await message.reply(random.choice(responses))
+    # Sassy responses deserve HTML too, just in case 💅
+    await message.reply(random.choice(responses), parse_mode=ParseMode.HTML)
