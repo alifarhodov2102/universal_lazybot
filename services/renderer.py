@@ -1,7 +1,7 @@
 from jinja2 import Template, exceptions
 import re
 
-# Alice's minimalist template: No more Google Maps, just clean data 💅
+# Alice fixed the broken HTML tags because accuracy matters 💅
 DEFAULT_TEMPLATE = """
 <b>{{ broker }}</b>
 
@@ -25,13 +25,13 @@ DEFAULT_TEMPLATE = """
 
 def _format_address(addr: str) -> str:
     """
-    Alice formats the address so it's not a giant mess.
+    Alice cleans up the messy address formatting for dispatchers.
     """
     if not addr:
         return ""
     addr = addr.strip()
     
-    # Splitting long one-liners into readable parts for better UX
+    # Split long single-line addresses for better readability
     if "\n" not in addr and addr.count(",") >= 2:
         parts = addr.split(",", 1)
         return f"{parts[0].strip()},\n{parts[1].strip()}"
@@ -40,9 +40,9 @@ def _format_address(addr: str) -> str:
 
 def render_result(data: dict, user_template: str = None) -> str:
     """
-    Converts JSON data from the extractor into a sassy yet clean text format 🥱.
+    Converts JSON data into a clean, bolded, and sassy Telegram message 🥱.
     """
-    # 1. Clean and prepare the data
+    # 1. Sanitize and prepare data for rendering
     clean_data = {
         "broker": (data.get("broker") or "Rate Confirmation").strip(),
         "load_number": (data.get("load_number") or "N/A").strip(),
@@ -64,16 +64,16 @@ def render_result(data: dict, user_template: str = None) -> str:
         ]
     }
 
-    # 2. Select the template
+    # 2. Use custom or default template
     tmpl_str = user_template if user_template else DEFAULT_TEMPLATE
 
     try:
-        # 3. Render with HTML support for Telegram 💅
+        # 3. Render and clean up white spaces for Telegram
         template = Template(tmpl_str)
         rendered_text = template.render(**clean_data)
         
-        # Clean up triple newlines and return the clean result
+        # Eliminate excessive newlines
         return re.sub(r'\n{3,}', '\n\n', rendered_text).strip()
     
     except exceptions.TemplateError as e:
-        return f"⚠️ <b>Template Error:</b> {str(e)}\n\nPlease check your settings, honey."
+        return f"⚠️ <b>Template Error:</b> {str(e)}\n\nCheck your logic, honey. 💅"

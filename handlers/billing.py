@@ -16,13 +16,16 @@ async def show_plans(message: types.Message):
     prices = [LabeledPrice(label="Pro Plan (30 days)", amount=250)]
     
     description = (
-        "✨ <b>Alice's Premium Access</b> ✨\n\n"
+        "✨ Alice's Premium Access ✨\n\n"
         "Choose your lazy way to pay:\n"
-        "💰 <b>Price:</b> 250 Stars OR <b>59,999 UZS</b> / month\n\n"
+        "💰 Price: 250 Stars OR 59,999 UZS / month\n\n"
         "✅ Unlimited RC extractions\n"
         "✅ Custom output templates\n"
         "✅ Full OCR & AI priority support\n\n"
-        "<i>Click 'Pay with Stars' for instant activation, or 'Pay via Card' to message the boss manually.</i> 🥱💅"
+        "💳 Manual Card Payment:\n"
+        "<code>5614682203258662</code> (Click to copy)\n"
+        "⚠️ Send the receipt to @lazyalice_admin after paying.\n\n"
+        "Click 'Pay with Stars' for instant activation, or follow the card instructions. 🥱💅"
     )
 
     # Hybrid Keyboard: Automated Stars + Manual Card Link
@@ -65,9 +68,9 @@ async def on_successful_payment(message: types.Message):
         await session.commit()
 
     success_text = (
-        "❤️ <b>Alice is impressed!</b> ❤️\n\n"
+        "❤️ Alice is impressed! ❤️\n\n"
         "Your automated payment was successful. Pro status is active.\n"
-        f"Valid until: <b>{expire_at.strftime('%d.%m.%Y')}</b> 💅"
+        f"Valid until: {expire_at.strftime('%d.%m.%Y')} 💅"
     )
     await message.answer(success_text, parse_mode="HTML")
 
@@ -87,4 +90,4 @@ async def check_status(message: types.Message):
     else:
         status = f"🆓 Free ({user.free_uses if user else 0} remaining)"
 
-    await message.answer(f"❤️ <b>Current Status:</b> {status}", parse_mode="HTML")
+    await message.answer(f"❤️ Current Status: {status}", parse_mode="HTML")
