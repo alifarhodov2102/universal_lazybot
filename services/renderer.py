@@ -1,7 +1,7 @@
 from jinja2 import Template, exceptions
 import re
 
-# Alice updated the spacing logic to keep your stops separated 💅
+# Alice's final template: Perfect spacing, bold headers, and clean breaks 💅
 DEFAULT_TEMPLATE = """
 <b>{{ broker }}</b>
 
@@ -27,13 +27,13 @@ DEFAULT_TEMPLATE = """
 
 def _format_address(addr: str) -> str:
     """
-    Alice formats the address so it's clean and readable.
+    Alice makes the address readable so dispatchers don't get a headache.
     """
     if not addr:
         return ""
     addr = addr.strip()
     
-    # Split single line addresses into two lines if they contain multiple commas
+    # Split single-line addresses into two lines for better visual structure
     if "\n" not in addr and addr.count(",") >= 2:
         parts = addr.split(",", 1)
         return f"{parts[0].strip()},\n{parts[1].strip()}"
@@ -42,9 +42,9 @@ def _format_address(addr: str) -> str:
 
 def render_result(data: dict, user_template: str = None) -> str:
     """
-    Converts JSON data into a clean, bolded, and perfectly spaced message 🥱.
+    Converts raw JSON into a beautifully formatted Telegram message 🥱.
     """
-    # 1. Prepare and clean data for rendering
+    # 1. Clean up the data before Alice touches it
     clean_data = {
         "broker": (data.get("broker") or "Rate Confirmation").strip(),
         "load_number": (data.get("load_number") or "N/A").strip(),
@@ -66,16 +66,16 @@ def render_result(data: dict, user_template: str = None) -> str:
         ]
     }
 
-    # 2. Choose the template (Default now includes better spacing)
+    # 2. Pick the winning template
     tmpl_str = user_template if user_template else DEFAULT_TEMPLATE
 
     try:
-        # 3. Render the template
+        # 3. Let Alice work her magic 💅
         template = Template(tmpl_str)
         rendered_text = template.render(**clean_data)
         
-        # Remove extra triple newlines that mess up the look
+        # Remove any triple-newline "accidents" to keep it tight
         return re.sub(r'\n{3,}', '\n\n', rendered_text).strip()
     
     except exceptions.TemplateError as e:
-        return f"⚠️ <b>Template Error:</b> {str(e)}\n\nPlease check your logic, honey. 💅"
+        return f"⚠️ <b>Template Error:</b> {str(e)}\n\nDon't break my heart (or my code), honey. 💅"
