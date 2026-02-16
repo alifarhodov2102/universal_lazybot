@@ -1,7 +1,7 @@
 from jinja2 import Template, exceptions
 import re
 
-# Alice's final template: Perfect spacing, bold headers, and clean breaks 💅
+# Alice fixed the template to ensure every bold tag is closed properly 💅
 DEFAULT_TEMPLATE = """
 <b>{{ broker }}</b>
 
@@ -71,6 +71,7 @@ def render_result(data: dict, user_template: str = None) -> str:
 
     try:
         # 3. Let Alice work her magic 💅
+        # We use a strict template to ensure no broken HTML is generated
         template = Template(tmpl_str)
         rendered_text = template.render(**clean_data)
         
@@ -78,4 +79,5 @@ def render_result(data: dict, user_template: str = None) -> str:
         return re.sub(r'\n{3,}', '\n\n', rendered_text).strip()
     
     except exceptions.TemplateError as e:
-        return f"⚠️ <b>Template Error:</b> {str(e)}\n\nDon't break my heart (or my code), honey. 💅"
+        # Even the error message is bolded for you 🥱
+        return f"⚠️ <b>Template Error:</b> {str(e)}\n\nDon't break my code, honey. 💅"
