@@ -13,10 +13,10 @@ logger = logging.getLogger("Extractor")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
 
-# 1. Regex Patterns
-LOAD_RE = re.compile(r"(?:PRO\s*#|Load\s*#|Order\s*#|Reference\s*#|#)[:\s]*([A-Z0-9-]+)", re.I)
-RATE_RE = re.compile(r"(?:TOTAL\s*RATE|LINE\s*HAUL\s*RATE|Total\s*Pay|Rate)[:\s]*\$?\s*([\d,]+\.\d{2})", re.I)
-MILES_RE = re.compile(r"(?:Miles|Distance|Total\s*Miles)[:\s]*(\d+)", re.I)
+# 1. Improved Regex Patterns for US Logistics
+LOAD_RE = re.compile(r"(?:Load\s*#|Order\s*#|Reference\s*#|PRO\s*#)[:\s]*([0-9]{5,10})", re.I)
+RATE_RE = re.compile(r"(?:Total\s*Carrier\s*Pay|Total\s*Pay|Flat\s*Rate|Rate)[:\s]*\$?\s*([\d,]+\.\d{2})", re.I)
+MILES_RE = re.compile(r"(?:Total\s*Miles|Distance|Miles)[:\s]*([\d.,]+)", re.I)
 
 def regex_extract(text: str) -> dict:
     data = {
@@ -30,7 +30,8 @@ def regex_extract(text: str) -> dict:
     
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     if lines:
-        data["broker"] = lines[0][:60]
+        # Broker is usually in the first 3 lines of a professional RC
+        data["broker"] = " ".join(lines[:3])[:100]
 
     if load_match := LOAD_RE.search(text):
         data["load_number"] = load_match.group(1)
@@ -49,8 +50,9 @@ async def get_miles_free(origin: str, destination: str) -> str:
     try:
         async with httpx.AsyncClient() as client:
             async def get_coords(addr):
+                # Using Nominatim with proper headers
                 url = f"https://nominatim.openstreetmap.org/search?q={addr}&format=json&limit=1"
-                r = await client.get(url, headers={"User-Agent": "LazyBot/1.0"}, timeout=10)
+                r = await client.get(url, headers={"User-Agent": "LazyBot_Logistics/2.0"}, timeout=10)
                 if r.status_code == 200 and r.json():
                     return r.json()[0]["lat"], r.json()[0]["lon"]
                 return None
@@ -72,31 +74,37 @@ async def get_miles_free(origin: str, destination: str) -> str:
 async def deepseek_ai_extract(text: str) -> dict:
     if not DEEPSEEK_API_KEY: return None
     
-    full_text = text[:15000]
+    # Send only the most relevant part of the RC to save tokens and focus AI
+    full_text = text[:12000]
 
     prompt = f"""
-Analyze this logistics Rate Confirmation carefully. 
-Extract ALL information and return ONLY valid JSON.
+Analyze this US Logistics Rate Confirmation. 
+Extract data with high precision. RETURN ONLY VALID JSON.
 
-JSON structure:
+Guidelines:
+1. BROKER: Look for the company name at the very top (e.g., RYAN TRANSPORTATION, ECHO, TQL). DO NOT return MC numbers or Fax.
+2. LOAD_NUMBER: Look for 'Load #', 'Order #', or 'Reference #'. It's usually 6-10 digits.
+3. RATE: Look for 'Total Carrier Pay' or 'Total:'. Ignore 'Tracking Hold' or individual fees.
+4. STOPS: 
+   - PU (Pickups): Look for 'PU 1', 'Shipper', or 'Origin'.
+   - DEL (Deliveries): Look for 'SO 1', 'Consignee', or 'Destination'.
+   - Extract: Facility Name, Full Address (Street, City, ST, Zip), and Appointment Time.
+5. MILES: Total distance between origin and destination.
+
+Return this JSON:
 {{
-  "broker": "Full company name",
-  "load_number": "Main Load# (look for #NUMBER at top)",
-  "pickups": [{{ "facility": "", "address": "", "time": "" }}],
-  "deliveries": [{{ "facility": "", "address": "", "time": "" }}],
-  "rate": "Total money amount (Look for 'Line Haul - Flat Rate' or 'Total:', ignore 'Amount: 1')",
-  "total_miles": "Total miles"
+  "broker": "Full Legal Company Name",
+  "load_number": "Numeric ID only",
+  "pickups": [{{ "facility": "Name", "address": "Full Address", "time": "Date/Time" }}],
+  "deliveries": [{{ "facility": "Name", "address": "Full Address", "time": "Date/Time" }}],
+  "rate": "Total amount (e.g. 1500.00)",
+  "total_miles": "Distance"
 }}
 
-Rules:
-1. RATE: Values like 3000.00 are rates. 
-2. STOPS: 'PICK 1' is pickup, 'STOP 1' is delivery. 
-3. MILES: Look for 'Miles:' (e.g., 769).
-
-TEXT:
-{full_text} 
+TEXT TO ANALYZE:
+{full_text}
 """
-    logger.info("DeepSeek request sent... hope it's not too long 🙄")
+    logger.info("DeepSeek: Consulting the AI Oracle... 🥱")
     async with httpx.AsyncClient() as client:
         try:
             response = await client.post(
@@ -104,36 +112,36 @@ TEXT:
                 headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
                 json={
                     "model": "deepseek-chat",
-                    "messages": [{"role": "system", "content": "You are a logistics expert. Output ONLY valid JSON."},
-                                 {"role": "user", "content": prompt}],
+                    "messages": [
+                        {"role": "system", "content": "You are a US Logistics Specialist. You ignore garbage text and extract only business data into JSON."},
+                        {"role": "user", "content": prompt}
+                    ],
                     "temperature": 0
                 },
-                timeout=50.0
+                timeout=60.0
             )
             
-            raw_content = response.json()['choices'][0]['message']['content']
-            clean_json = raw_content.replace("```json", "").replace("```", "").strip()
+            content = response.json()['choices'][0]['message']['content']
+            clean_json = content.replace("```json", "").replace("```", "").strip()
             return json.loads(clean_json)
         except Exception as e:
-            logger.error(f"DeepSeek Parsing Error: {e}")
+            logger.error(f"DeepSeek AI Error: {e}")
             return None
 
 async def smart_extract(text: str) -> dict:
-    logger.info("Starting Smart Extraction... 💅")
-    data = regex_extract(text)
+    logger.info("Starting Extraction Pipeline... 💅")
     
-    is_incomplete = not data["rate"] or not data["load_number"] or not data["pickups"]
+    # Start with AI for high accuracy on McLeod/Ryan layouts
+    data = await deepseek_ai_extract(text)
     
-    if is_incomplete:
-        logger.info("Ugh, Regex failed. Waking up the AI... 🥱")
-        ai_data = await deepseek_ai_extract(text)
-        if ai_data:
-            for key, value in ai_data.items():
-                if value and (not data.get(key) or data[key] == "" or data[key] == []):
-                    data[key] = value
-
-    if not data.get("total_miles") or data["total_miles"] == "":
-        if data["pickups"] and data["deliveries"]:
+    # Fallback to Regex if AI fails completely
+    if not data:
+        logger.warning("AI failed. Falling back to basic Regex... 🙄")
+        data = regex_extract(text)
+    
+    # Verify and fix miles if missing
+    if not data.get("total_miles") or data["total_miles"] in ["", "N/A", "0"]:
+        if data.get("pickups") and data.get("deliveries"):
             origin = data["pickups"][0]["address"]
             dest = data["deliveries"][-1]["address"]
             miles = await get_miles_free(origin, dest)
