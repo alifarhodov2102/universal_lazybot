@@ -2,10 +2,11 @@ import os
 import random
 from aiogram import Router, types, F, Bot
 from aiogram.filters import CommandStart, Command
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from aiogram.fsm.context import FSMContext
+from sqlalchemy import select, update
 from database.models import User
 from database.connection import AsyncSessionLocal
+from utils.states import TemplateStates # State-larni import qilamiz 💅
 
 router = Router()
 
@@ -15,18 +16,15 @@ async def cmd_start(message: types.Message):
     full_name = message.from_user.full_name
 
     # 1. IMMEDIATE FEEDBACK 🚀
-    # User 20 soniya kutmaydi, darhol Alice uyg'onganini ko'radi.
-    # Bu DB latency (sekinlikni) yashiradi.
     status_msg = await message.answer("❤️ <b>👀 I woke up... let me check who you are.</b> 🥱", parse_mode="HTML")
 
     async with AsyncSessionLocal() as session:
-        # 2. Check Alice's memory (Database)
         stmt = select(User).where(User.tg_id == tg_id)
         result = await session.execute(stmt)
         user = result.scalar_one_or_none()
 
         if not user:
-            # New person? Alice reluctantly creates a profile.
+            # User profile creation
             new_user = User(
                 tg_id=tg_id,
                 username=message.from_user.username,
@@ -36,39 +34,74 @@ async def cmd_start(message: types.Message):
             await session.commit()
             
             welcome_text = (
-                f"❤️ <b>Oh, hi {full_name}... I guess.</b> ❤️\n\n"
-                f"I'm <b>Alice</b>, and I parse your messy logistics PDFs because you clearly can't be bothered to do it yourself. 💅\n\n"
-                f"I'll give you <b>2 free</b> extractions. After that, no coffee = no work. ☕\n\n"
-                f"<i>Just send me a PDF. Or don't. I'm taking a nap either way.</i> 🥱"
+                f"👋 <b>Welcome to Lazy Alice, {full_name}!</b>\n\n"
+                "I'm here to extract data from your Rate Confirmations (RC) in seconds. 🥱\n\n"
+                "📜 <b>My Commands:</b>\n"
+                "🚀 /start - Show this welcome message\n"
+                "💎 /status - Check your subscription and free uses\n"
+                "💳 /plans - Upgrade to Pro (Stars or Card)\n"
+                "⚙️ /set_template - Customize your output format, just send me your example load info and I will become your structure forever\n"
+                "❓ /help - If you get stuck\n\n"
+                "💡 <b>How to use:</b>\n"
+                "1. Send me a <b>PDF</b> document.\n"
+                "2. Copy the result and send it to your dispatcher! 💅\n\n"
+                "<i>I'll give you 2 free extractions. Use them wisely.</i> 🥱"
             )
         else:
-            # Welcome back.
-            status = "Pro ✅ (My favorite ✨)" if user.is_pro else f"Freebie ({user.free_uses} left) 🆓"
+            status = "Pro ✅" if user.is_pro else f"Free ({user.free_uses} left) 🆓"
             welcome_text = (
                 f"❤️ <b>Back again, {full_name}?</b> ❤️\n\n"
                 f"Status: <b>{status}</b>\n\n"
-                f"Drop the PDF here. I'll look at it when I feel like it... maybe. 🥱💅"
+                f"Drop the PDF here. I'm ready (I guess). 🥱💅"
             )
 
-        # 3. EDIT INITIAL MESSAGE
-        # Yangi xabar yubormasdan, eskisini tahrirlaymiz. Bu yanada professional ko'rinadi.
         await status_msg.edit_text(welcome_text, parse_mode="HTML")
 
 @router.message(Command("help"))
 async def cmd_help(message: types.Message):
-    # Alice explains the rules in her own sassy way.
     help_text = (
-        "💅 <b>Alice's Guide to Not Annoying Me:</b>\n\n"
-        "1. <b>Send a PDF</b>: Only Rate Confirmations. I don't care about your memes. 🙄\n"
-        "2. <b>Wait</b>: I'm slow, and thinking is hard. The progress bar will move eventually. 🥱\n"
-        "3. <b>Settings</b>: Use /settings if you want to customize how I work for you.\n\n"
-        "<i>Now leave me alone unless you have an RC to process.</i> 💅"
+        "❓ <b>Need help, honey?</b>\n\n"
+        "<b>1. Formatting:</b> If you want to change how the text looks, use /set_template. 💅\n"
+        "<b>2. Card Payment:</b> Use /plans and click the link to send the receipt here:\n"
+        "<code>5614682203258662</code> (Click to copy)\n\n"
+        "<b>3. Not reading PDF:</b> Make sure it's a real RC, not a blurry photo of your screen. 🙄\n\n"
+        "Contact @lazyalice_admin for manual activation. 💅"
     )
     await message.answer(help_text, parse_mode="HTML")
 
+# --- CUSTOM TEMPLATE LOGIC --- 💅
+@router.message(Command("set_template"))
+async def cmd_set_template(message: types.Message, state: FSMContext):
+    """Start the template customization process"""
+    guide = (
+        "⚙️ <b>Custom Template Editor</b>\n\n"
+        "Send me your new format. Use these tags:\n"
+        "<code>{{ broker }}</code>, <code>{{ load_number }}</code>, "
+        "<code>{{ rate }}</code>, <code>{{ total_miles }}</code>\n\n"
+        "Example:\n"
+        "<i>Broker: {{ broker }}\nLoad: {{ load_number }}\nPay: {{ rate }}</i>\n\n"
+        "Send your template now or /cancel. 🥱"
+    )
+    await message.answer(guide, parse_mode="HTML")
+    await state.set_state(TemplateStates.waiting_for_template)
+
+@router.message(TemplateStates.waiting_for_template)
+async def process_template(message: types.Message, state: FSMContext):
+    """Save the user's custom template to DB"""
+    new_tmpl = message.text
+    tg_id = message.from_user.id
+
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            update(User).where(User.tg_id == tg_id).values(template_text=new_tmpl)
+        )
+        await session.commit()
+
+    await message.answer("✅ <b>Template saved!</b>\nI'll use this for your next PDF. 🥱💅", parse_mode="HTML")
+    await state.clear()
+
 @router.message(F.text & ~F.text.startswith("/"))
 async def sassy_chat(message: types.Message):
-    # Sassy responses for non-PDF/non-command text
     responses = [
         "🙄 I'm a bot, not your therapist. Send me a PDF or leave me alone.",
         "💅 Don't try to text me. Only PDFs get my attention.",
