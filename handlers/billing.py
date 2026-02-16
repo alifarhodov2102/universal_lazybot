@@ -12,34 +12,34 @@ router = Router()
 
 @router.message(Command("plans"))
 async def show_plans(message: types.Message):
-    prices = [LabeledPrice(label="Pro Plan (30 days)", amount=250)]
-    
-    # ⚠️ IMPORTANT: Telegram Invoices only support basic HTML in descriptions.
-    # We must ensure every single tag is perfectly opened and closed.
-    description = (
+    # 1. Alice sends a regular message first — formatting here ALWAYS works 💅
+    plan_details = (
         "✨ <b>Alice's Premium Access</b> ✨\n\n"
-        "Choose your lazy way to pay:\n"
         "💰 <b>Price:</b> 250 Stars OR <b>59,999 UZS</b> / month\n\n"
         "✅ Unlimited RC extractions\n"
         "✅ Custom output templates\n"
         "✅ Full OCR & AI priority support\n\n"
         "💳 <b>Manual Card Payment:</b>\n"
-        "<code>5614682203258662</code>\n\n"
-        "⚠️ <i>Send the receipt to @lazyalice_admin after paying.</i>\n\n"
-        "Click 'Pay with Stars' for instant activation. 🥱💅"
+        "<code>5614682203258662</code> (Click to copy)\n\n"
+        "⚠️ <i>Send the receipt to @lazyalice_admin after paying.</i>"
     )
+    
+    await message.answer(plan_details, parse_mode="HTML")
 
+    # 2. Then Alice sends the actual invoice with a clean, plain description 🥱
+    prices = [LabeledPrice(label="Pro Plan (30 days)", amount=250)]
+    
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        # Pay button MUST be first and have pay=True
         [InlineKeyboardButton(text="✨ Pay with 250 Stars", pay=True)],
         [InlineKeyboardButton(text="📩 Send Receipt to Admin", url="https://t.me/lazyalice_admin")]
     ])
 
-    # Alice is using the internal tools to force the format 🥱
     await message.answer_invoice(
         title="Lazy Alice Pro Access",
-        description=description,
+        description="Instant activation via Telegram Stars (250 XTR)",
         payload="pro_sub_30d",
-        provider_token="", 
+        provider_token="", # Empty for Stars
         currency="XTR",
         prices=prices,
         start_parameter="pro-sub",
@@ -49,7 +49,7 @@ async def show_plans(message: types.Message):
 
 @router.pre_checkout_query()
 async def process_pre_checkout(query: PreCheckoutQuery):
-    """Alice confirms the transaction... finally. 🥱"""
+    """Alice confirms you have the stars... reluctantly. 🥱"""
     await query.answer(ok=True)
 
 @router.message(F.successful_payment)
@@ -72,12 +72,11 @@ async def on_successful_payment(message: types.Message):
         "Your automated payment was successful. Pro status is active.\n"
         "Valid until: <b>" + expire_at.strftime('%d.%m.%Y') + "</b> 💅"
     )
-    # Explicitly setting parse_mode for the success message
     await message.answer(success_text, parse_mode="HTML")
 
 @router.message(Command("status"))
 async def check_status(message: types.Message):
-    """Checking your subscription health 🥱"""
+    """Checking your subscription status 🥱"""
     async with AsyncSessionLocal() as session:
         stmt = select(User).where(User.tg_id == message.from_user.id)
         res = await session.execute(stmt)
@@ -92,3 +91,4 @@ async def check_status(message: types.Message):
         status = "🆓 <b>Free</b> (" + str(user.free_uses if user else 0) + " left)"
 
     await message.answer(f"❤️ <b>Current Status:</b> {status}", parse_mode="HTML")
+    
