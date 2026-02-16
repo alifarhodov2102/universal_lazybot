@@ -6,7 +6,7 @@ from aiogram.fsm.context import FSMContext
 from sqlalchemy import select, update
 from database.models import User
 from database.connection import AsyncSessionLocal
-from utils.states import TemplateStates # State-larni import qilamiz 💅
+from utils.states import TemplateStates
 
 router = Router()
 
@@ -15,7 +15,6 @@ async def cmd_start(message: types.Message):
     tg_id = message.from_user.id
     full_name = message.from_user.full_name
 
-    # 1. IMMEDIATE FEEDBACK 🚀
     status_msg = await message.answer("❤️ <b>👀 I woke up... let me check who you are.</b> 🥱", parse_mode="HTML")
 
     async with AsyncSessionLocal() as session:
@@ -24,7 +23,6 @@ async def cmd_start(message: types.Message):
         user = result.scalar_one_or_none()
 
         if not user:
-            # User profile creation
             new_user = User(
                 tg_id=tg_id,
                 username=message.from_user.username,
@@ -35,70 +33,102 @@ async def cmd_start(message: types.Message):
             
             welcome_text = (
                 f"👋 <b>Welcome to Lazy Alice, {full_name}!</b>\n\n"
-                "I'm here to extract data from your Rate Confirmations (RC) in seconds. 🥱\n\n"
-                "📜 <b>My Commands:</b>\n"
-                "🚀 /start - Show this welcome message\n"
-                "💎 /status - Check your subscription and free uses\n"
-                "💳 /plans - Upgrade to Pro (Stars or Card)\n"
-                "⚙️ /set_template - Customize your output format, just send me your example load info and I will become your structure forever\n"
-                "❓ /help - If you get stuck\n\n"
-                "💡 <b>How to use:</b>\n"
-                "1. Send me a <b>PDF</b> document.\n"
-                "2. Copy the result and send it to your dispatcher! 💅\n\n"
-                "<i>I'll give you 2 free extractions. Use them wisely.</i> 🥱"
+                "I save you <b>30% of your time</b> by parsing messy RCs in seconds. 🥱\n\n"
+                "📜 <b>Commands:</b>\n"
+                "🚀 /start - Show this message\n"
+                "💎 /status - Check Pro status & limits\n"
+                "⚙️ /set_template - Set your own format\n"
+                "📋 /my_template - See your current format\n"
+                "🔄 /reset_template - Go back to Alice's default\n"
+                "❓ /help - Get assistance\n\n"
+                "💡 <b>How to use:</b> Send me a <b>PDF</b> document. 💅"
             )
         else:
             status = "Pro ✅" if user.is_pro else f"Free ({user.free_uses} left) 🆓"
             welcome_text = (
                 f"❤️ <b>Back again, {full_name}?</b> ❤️\n\n"
                 f"Status: <b>{status}</b>\n\n"
-                f"Drop the PDF here. I'm ready (I guess). 🥱💅"
+                f"Drop the PDF here. Let's save that 30% of your time. 🥱💅"
             )
 
         await status_msg.edit_text(welcome_text, parse_mode="HTML")
+
+# --- TEMPLATE MANAGEMENT COMMANDS --- 💅
+
+@router.message(Command("my_template"))
+async def cmd_my_template(message: types.Message):
+    """Alice shows you what you're currently working with 🥱"""
+    async with AsyncSessionLocal() as session:
+        stmt = select(User).where(User.tg_id == message.from_user.id)
+        res = await session.execute(stmt)
+        user = res.scalar_one_or_none()
+
+    current = user.template_text if user and user.template_text else "Alice's Default (Sassy & Bold) 💅"
+    
+    await message.answer(
+        f"📋 <b>Your Current Template:</b>\n\n<code>{current}</code>\n\n"
+        "Use /set_template to change it or /reset_template to go back to my style. 🥱",
+        parse_mode="HTML"
+    )
+
+@router.message(Command("reset_template"))
+async def cmd_reset_template(message: types.Message):
+    """Alice takes back control. About time. 🙄"""
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            update(User).where(User.tg_id == message.from_user.id).values(template_text=None)
+        )
+        await session.commit()
+
+    await message.answer(
+        "🔄 <b>Template Reset!</b>\n\n"
+        "I've deleted your custom format. I'll use my original, perfect style from now on. 💅",
+        parse_mode="HTML"
+    )
+
+@router.message(Command("set_template"))
+async def cmd_set_template(message: types.Message, state: FSMContext):
+    guide = (
+        "⚙️ <b>Custom Template Editor</b>\n\n"
+        "Send me your format using these tags:\n"
+        "• <code>{{ broker }}</code>, <code>{{ load_number }}</code>, "
+        "<code>{{ rate }}</code>, <code>{{ total_miles }}</code>\n\n"
+        "<b>Example:</b>\n"
+        "<i>Broker: {{ broker }}\nLoad#: {{ load_number }}\nPay: {{ rate }}</i>\n\n"
+        "⚠️ <b>Note:</b> Any other command will cancel this setup. 🥱"
+    )
+    await message.answer(guide, parse_mode="HTML")
+    await state.set_state(TemplateStates.waiting_for_template)
+
+@router.message(TemplateStates.waiting_for_template, F.text.startswith("/"))
+async def auto_cancel_template(message: types.Message, state: FSMContext):
+    await state.clear()
+    return False 
+
+@router.message(TemplateStates.waiting_for_template, F.text)
+async def process_template(message: types.Message, state: FSMContext):
+    new_tmpl = message.text
+    if "{{" not in new_tmpl:
+        return await message.answer("🙄 Honey, use the tags (e.g., {{ broker }}). Try again or /cancel.")
+
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            update(User).where(User.tg_id == message.from_user.id).values(template_text=new_tmpl)
+        )
+        await session.commit()
+
+    await message.answer("✅ <b>Template saved!</b>\nYour dispatch is now 30% faster. 🥱💅", parse_mode="HTML")
+    await state.clear()
 
 @router.message(Command("help"))
 async def cmd_help(message: types.Message):
     help_text = (
         "❓ <b>Need help, honey?</b>\n\n"
-        "<b>1. Formatting:</b> If you want to change how the text looks, use /set_template. 💅\n"
-        "<b>2. Card Payment:</b> Use /plans and click the link to send the receipt here:\n"
-        "<code>5614682203258662</code> (Click to copy)\n\n"
-        "<b>3. Not reading PDF:</b> Make sure it's a real RC, not a blurry photo of your screen. 🙄\n\n"
-        "Contact @lazyalice_admin for manual activation. 💅"
+        "<b>1. Formatting:</b> Use /set_template to customize or /reset_template to clear. 💅\n"
+        "<b>2. Payment:</b> Pay 59,999 UZS to <code>5614682203258662</code> and send receipt to @lazyalice_admin.\n\n"
+        "<b>3. Issues:</b> If I'm slow, my coffee is cold. Just wait 5-10 seconds. 🥱"
     )
     await message.answer(help_text, parse_mode="HTML")
-
-# --- CUSTOM TEMPLATE LOGIC --- 💅
-@router.message(Command("set_template"))
-async def cmd_set_template(message: types.Message, state: FSMContext):
-    """Start the template customization process"""
-    guide = (
-        "⚙️ <b>Custom Template Editor</b>\n\n"
-        "Send me your new format. Use these tags:\n"
-        "<code>{{ broker }}</code>, <code>{{ load_number }}</code>, "
-        "<code>{{ rate }}</code>, <code>{{ total_miles }}</code>\n\n"
-        "Example:\n"
-        "<i>Broker: {{ broker }}\nLoad: {{ load_number }}\nPay: {{ rate }}</i>\n\n"
-        "Send your template now or /cancel. 🥱"
-    )
-    await message.answer(guide, parse_mode="HTML")
-    await state.set_state(TemplateStates.waiting_for_template)
-
-@router.message(TemplateStates.waiting_for_template)
-async def process_template(message: types.Message, state: FSMContext):
-    """Save the user's custom template to DB"""
-    new_tmpl = message.text
-    tg_id = message.from_user.id
-
-    async with AsyncSessionLocal() as session:
-        await session.execute(
-            update(User).where(User.tg_id == tg_id).values(template_text=new_tmpl)
-        )
-        await session.commit()
-
-    await message.answer("✅ <b>Template saved!</b>\nI'll use this for your next PDF. 🥱💅", parse_mode="HTML")
-    await state.clear()
 
 @router.message(F.text & ~F.text.startswith("/"))
 async def sassy_chat(message: types.Message):
