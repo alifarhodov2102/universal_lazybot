@@ -13,21 +13,17 @@ logger = logging.getLogger("Extractor")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
 
-# 1. Regex Patterns for US Logistics Fallback
-LOAD_RE = re.compile(r"(?:Load\s*#|Order\s*#|Reference\s*#|PRO\s*#)[:\s]*([0-9]{5,10})", re.I)
-RATE_RE = re.compile(r"(?:Total\s*Carrier\s*Pay|Total\s*Pay|Flat\s*Rate|Rate)[:\s]*\$?\s*([\d,]+\.\d{2})", re.I)
+# 1. High-Performance Regex Patterns (Alphanumeric for PRO/Load IDs)
+LOAD_RE = re.compile(r"(?:PRO\s*#|Load\s*#|Order\s*#|Reference\s*#)[:\s]*([0-9A-Z-]{5,15})", re.I)
+RATE_RE = re.compile(r"(?:Total\s*Rate|Total\s*Carrier\s*Pay|Total\s*Pay|Rate)[:\s]*\$?\s*([\d,]+\.\d{2})", re.I)
 MILES_RE = re.compile(r"(?:Total\s*Miles|Distance|Miles)[:\s]*([\d.,]+)", re.I)
 
 async def extract_template_structure(system_prompt: str, user_example: str) -> str:
-    """
-    Alice uses her AI brain to turn a driver's real load message into a 
-    clean skeleton/template for future use. 🧠💅
-    """
+    """Alice turns a real load message into a clean skeleton/template 🧠💅"""
     if not DEEPSEEK_API_KEY:
         logger.error("DEEPSEEK_API_KEY missing!")
         return user_example
 
-    logger.info("DeepSeek: Cleaning example text into a skeleton structure... 💅")
     async with httpx.AsyncClient() as client:
         try:
             response = await client.post(
@@ -45,21 +41,14 @@ async def extract_template_structure(system_prompt: str, user_example: str) -> s
             )
             result = response.json()
             skeleton = result['choices'][0]['message']['content'].strip()
-            # Remove any markdown code blocks the AI might add
             return skeleton.replace("```jinja2", "").replace("```json", "").replace("```", "").strip()
         except Exception as e:
             logger.error(f"Template Extraction Error: {e}")
             return user_example
 
 def regex_extract(text: str) -> dict:
-    data = {
-        "broker": "",
-        "load_number": "",
-        "pickups": [],
-        "deliveries": [],
-        "rate": "",
-        "total_miles": ""
-    }
+    """Fast extraction to save tokens on basic fields 💰"""
+    data = {"broker": "", "load_number": "", "rate": "", "total_miles": ""}
     
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     if lines:
@@ -77,28 +66,25 @@ def regex_extract(text: str) -> dict:
     return data
 
 async def get_miles_free(origin: str, destination: str) -> str:
-    """Alice calculates distance if the PDF is being lazy. 🗺️"""
+    """Alice calculates distance by stripping facility noise for OSRM 🗺️"""
     if not origin or not destination: return ""
     
-    # Logic: Strip known facility name patterns to help Nominatim find the address
-    # Ryan Transportation often puts facility names inside the address block.
-    clean_origin = re.sub(r'^.*?DC\s|.*?RESUPPLY\s|.*?FPDC\s', '', origin, flags=re.I).strip()
-    clean_dest = re.sub(r'^.*?DC\s|.*?RESUPPLY\s|.*?FPDC\s', '', destination, flags=re.I).strip()
+    # Clean facility names (FMC, Jasper, etc) so geocoding only sees the address
+    clean_regex = r'^(?:FMC|JASPER|ARMSTRONG|PLANT \d+|DC|RESUPPLY|FPDC|WAREHOUSE|LOGISTICS)\s+'
+    o_addr = re.sub(clean_regex, '', origin, flags=re.I).strip()
+    d_addr = re.sub(clean_regex, '', destination, flags=re.I).strip()
 
-    logger.info(f"OSRM: Routing between {clean_origin} and {clean_dest} 🧠")
-    
     try:
         async with httpx.AsyncClient() as client:
             async def get_coords(addr):
-                # Using Nominatim for Geocoding
                 url = f"[https://nominatim.openstreetmap.org/search?q=](https://nominatim.openstreetmap.org/search?q=){addr}&format=json&limit=1"
                 r = await client.get(url, headers={"User-Agent": "LazyBot_Logistics/2.0"}, timeout=15)
                 if r.status_code == 200 and r.json():
                     return r.json()[0]["lat"], r.json()[0]["lon"]
                 return None
 
-            o_coords = await get_coords(clean_origin)
-            d_coords = await get_coords(clean_dest)
+            o_coords = await get_coords(o_addr)
+            d_coords = await get_coords(d_addr)
 
             if o_coords and d_coords:
                 osrm_url = f"[http://router.project-osrm.org/route/v1/driving/](http://router.project-osrm.org/route/v1/driving/){o_coords[1]},{o_coords[0]};{d_coords[1]},{d_coords[0]}?overview=false"
@@ -111,34 +97,25 @@ async def get_miles_free(origin: str, destination: str) -> str:
     return ""
 
 async def deepseek_ai_extract(text: str) -> dict:
+    """AI handles the complex address blocks and stop verification 🧠"""
     if not DEEPSEEK_API_KEY: return None
-    full_text = text[:12000]
-
+    
     prompt = f"""
-Analyze this US Logistics Rate Confirmation. 
-Extract data with high precision. RETURN ONLY VALID JSON.
+Analyze this US Logistics Rate Confirmation. RETURN ONLY VALID JSON.
+CRITICAL: Prioritize 'PRO #' as the main Load ID.
 
-Guidelines:
-1. BROKER: Company name at the top (e.g., RYAN TRANSPORTATION, ECHO).
-2. LOAD_NUMBER: 'Load #', 'Order #', or 'Reference #'.
-3. RATE: 'Total Carrier Pay' or 'Total:'.
-4. STOPS: 
-   - PU (Pickups): 'PU 1', 'Shipper', or 'Origin'.
-   - DEL (Deliveries): 'SO 1', 'Consignee', or 'Destination'.
-   - Extract: Facility Name, Full Address, and Appointment Time.
-
-Return this JSON structure:
+Return JSON:
 {{
   "broker": "Full Legal Company Name",
-  "load_number": "Numeric ID only",
+  "load_number": "ID",
   "pickups": [{{ "facility": "Name", "address": "Full Address", "time": "Date/Time" }}],
   "deliveries": [{{ "facility": "Name", "address": "Full Address", "time": "Date/Time" }}],
-  "rate": "Total amount",
-  "total_miles": "Distance"
+  "rate": "0.00",
+  "total_miles": "0"
 }}
 
-TEXT TO ANALYZE:
-{full_text}
+TEXT:
+{text[:12000]}
 """
     async with httpx.AsyncClient() as client:
         try:
@@ -148,7 +125,7 @@ TEXT TO ANALYZE:
                 json={
                     "model": "deepseek-chat",
                     "messages": [
-                        {"role": "system", "content": "You are a US Logistics Specialist. Extract only business data into JSON."},
+                        {"role": "system", "content": "You are a US Logistics Specialist. Prioritize PRO # for Load ID."},
                         {"role": "user", "content": prompt}
                     ],
                     "temperature": 0
@@ -163,18 +140,27 @@ TEXT TO ANALYZE:
             return None
 
 async def smart_extract(text: str) -> dict:
-    logger.info("Starting Extraction Pipeline... 💅")
-    data = await deepseek_ai_extract(text)
+    logger.info("Starting Universal Extraction Pipeline... 💅")
     
-    if not data:
-        data = regex_extract(text)
+    # 1. Regex First (Cost: $0)
+    data = regex_extract(text)
     
-    # Logic: Verify and calculate miles if AI missed it (common with Ryan/McLeod PDFs)
-    if not data.get("total_miles") or data["total_miles"] in ["", "N/A", "0"]:
+    # 2. AI Second for Stops and Verification
+    ai_data = await deepseek_ai_extract(text)
+    
+    if ai_data:
+        # Merge AI stops and missing fields into regex data
+        data["pickups"] = ai_data.get("pickups", [])
+        data["deliveries"] = ai_data.get("deliveries", [])
+        if not data["load_number"]: data["load_number"] = ai_data.get("load_number")
+        if not data["rate"] or data["rate"] == "0.00": data["rate"] = ai_data.get("rate")
+        if not data["total_miles"] or data["total_miles"] == "0": data["total_miles"] = ai_data.get("total_miles")
+        if not data["broker"]: data["broker"] = ai_data.get("broker")
+
+    # 3. Final Mileage Check (If PDF and AI both failed)
+    if not data.get("total_miles") or str(data["total_miles"]) in ["", "N/A", "0"]:
         if data.get("pickups") and data.get("deliveries"):
-            origin = data["pickups"][0]["address"]
-            dest = data["deliveries"][-1]["address"]
-            miles = await get_miles_free(origin, dest)
+            miles = await get_miles_free(data["pickups"][0]["address"], data["deliveries"][-1]["address"])
             data["total_miles"] = miles
             
     return data

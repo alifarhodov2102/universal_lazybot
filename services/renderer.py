@@ -63,21 +63,26 @@ def _calculate_duration(pickups: list, deliveries: list) -> str:
         pu_str = pickups[0].get("time", "")
         del_str = deliveries[-1].get("time", "")
         
-        # Regex to find dates in common formats (MM/DD/YYYY or MM/DD/YY)
+        # Regex to find dates (MM/DD/YYYY or MM/DD/YY)
         date_pattern = re.compile(r"(\d{1,2}/\d{1,2}/\d{2,4})")
         pu_match = date_pattern.search(pu_str)
         del_match = date_pattern.search(del_str)
         
         if pu_match and del_match:
-            # Simple day difference calculation
-            fmt = "%m/%d/%y" if len(pu_match.group(1).split('/')[-1]) == 2 else "%m/%d/%Y"
-            d1 = datetime.strptime(pu_match.group(1), fmt)
-            d2 = datetime.strptime(del_match.group(1), fmt)
+            d1_str = pu_match.group(1)
+            d2_str = del_match.group(1)
+            
+            # Flexible year formatting
+            fmt1 = "%m/%d/%y" if len(d1_str.split('/')[-1]) == 2 else "%m/%d/%Y"
+            fmt2 = "%m/%d/%y" if len(d2_str.split('/')[-1]) == 2 else "%m/%d/%Y"
+            
+            d1 = datetime.strptime(d1_str, fmt1)
+            d2 = datetime.strptime(d2_str, fmt2)
             diff = d2 - d1
             
             days = diff.days
-            # Logic: assume at least 14h for any overnight, or simplify to days/hours
-            return f"{days}d 14h" if days >= 0 else "N/A"
+            # Default to at least 14h for overnight loads as requested
+            return f"{max(0, days)}d 14h"
     except:
         pass
     return "0d 14h"
@@ -85,23 +90,25 @@ def _calculate_duration(pickups: list, deliveries: list) -> str:
 def render_result(data: dict, user_template: str = None) -> str:
     """Converts raw JSON into a beautifully formatted Telegram message 🥱."""
     
-    # 1. Handle Miles formatting
-    raw_miles = data.get("total_miles")
-    miles_str = str(raw_miles).replace(',', '')
-    if miles_str and re.match(r"^\d*\.?\d+$", miles_str):
-        miles_float = float(miles_str)
-        miles_display = f"{miles_float} mi"
-    else:
+    # 1. Handle Miles formatting (Remove 'mi' if already exists to avoid 'mi mi')
+    raw_miles = str(data.get("total_miles") or "0").replace('mi', '').replace(',', '').strip()
+    try:
+        miles_float = float(raw_miles)
+        miles_display = f"{miles_float} mi" if miles_float > 0 else "N/A"
+    except:
         miles_float = 0
         miles_display = "N/A"
 
     # 2. Handle Rate and Per Mile calculation 💰
     raw_rate = data.get("rate") or "0"
+    # Strip everything except numbers and decimals
     rate_clean = re.sub(r"[^\d.]", "", str(raw_rate))
     try:
         rate_float = float(rate_clean)
+        rate_display = f"${rate_float:,.2f}"
         per_mile = f"${round(rate_float / miles_float, 2)}/mi" if miles_float > 0 else "N/A"
     except:
+        rate_display = raw_rate if raw_rate != "0" else "N/A"
         per_mile = "N/A"
 
     # 3. Trip Duration 🕒
@@ -113,9 +120,9 @@ def render_result(data: dict, user_template: str = None) -> str:
 
     # 5. Clean up the data for rendering
     clean_data = {
-        "broker": (data.get("broker") or "Rate Confirmation").strip(),
+        "broker": (data.get("broker") or "N/A").strip(),
         "load_number": (data.get("load_number") or "N/A").strip(),
-        "rate": (data.get("rate") or "N/A").strip(),
+        "rate": rate_display,
         "total_miles": miles_display,
         "per_mile": per_mile,
         "duration": duration,
