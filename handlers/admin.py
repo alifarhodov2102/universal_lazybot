@@ -19,7 +19,7 @@ router = Router()
 # 1. State Management for Scaling, Broadcasts, and Search
 class AdminStates(StatesGroup):
     waiting_for_search_query = State()
-    waiting_for_broadcast_content = State() # Changed to 'content' for media support
+    waiting_for_broadcast_content = State()
 
 @router.message(Command("admin_panel"))
 async def admin_panel_root(message: types.Message):
@@ -29,11 +29,28 @@ async def admin_panel_root(message: types.Message):
 
     builder = InlineKeyboardBuilder()
     builder.row(types.InlineKeyboardButton(text="🔍 Search User", callback_data="admin_search"))
-    builder.row(types.InlineKeyboardButton(text="📢 Broadcast (Text/Media)", callback_data="admin_broadcast"))
+    builder.row(types.InlineKeyboardButton(text="📢 Broadcast", callback_data="admin_broadcast"))
     builder.row(types.InlineKeyboardButton(text="📊 Stats", callback_data="admin_stats"))
     builder.row(types.InlineKeyboardButton(text="💾 Download DB", callback_data="admin_download_db"))
 
     await message.answer(
+        "🛠 <b>Alice's High-Level Control</b>\n\nHow do you want to manage your empire today? 🥱",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML"
+    )
+
+@router.callback_query(F.data == "admin_cancel")
+async def cancel_admin_action(callback: types.CallbackQuery, state: FSMContext):
+    """Alice stops what she's doing 🙄"""
+    await state.clear()
+    await callback.message.edit_text("🔄 <b>Action cancelled.</b> Back to the panel. 💅", parse_mode="HTML")
+    # Show panel again after cancellation
+    builder = InlineKeyboardBuilder()
+    builder.row(types.InlineKeyboardButton(text="🔍 Search User", callback_data="admin_search"))
+    builder.row(types.InlineKeyboardButton(text="📢 Broadcast", callback_data="admin_broadcast"))
+    builder.row(types.InlineKeyboardButton(text="📊 Stats", callback_data="admin_stats"))
+    builder.row(types.InlineKeyboardButton(text="💾 Download DB", callback_data="admin_download_db"))
+    await callback.message.answer(
         "🛠 <b>Alice's High-Level Control</b>\n\nHow do you want to manage your empire today? 🥱",
         reply_markup=builder.as_markup(),
         parse_mode="HTML"
@@ -62,10 +79,14 @@ async def download_db_file(callback: types.CallbackQuery):
 @router.callback_query(F.data == "admin_broadcast")
 async def start_broadcast(callback: types.CallbackQuery, state: FSMContext):
     """Alice prepares to shout at everyone. 🥱"""
+    builder = InlineKeyboardBuilder()
+    builder.row(types.InlineKeyboardButton(text="❌ Cancel Broadcast", callback_data="admin_cancel"))
+
     await callback.message.answer(
         "📣 <b>Broadcast Mode</b>\n\nSend me <b>ANYTHING</b> (Text, Photo, or Video) to send to everyone. "
         "I will copy it exactly as you send it, including captions! 💅",
-        parse_mode="HTML"
+        parse_mode="HTML",
+        reply_markup=builder.as_markup()
     )
     await state.set_state(AdminStates.waiting_for_broadcast_content)
     await callback.answer()
@@ -107,12 +128,21 @@ async def execute_broadcast(message: types.Message, state: FSMContext):
 # --- USER SEARCH & MANAGEMENT --- 🔍
 @router.callback_query(F.data == "admin_search")
 async def start_search(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.answer("⌨️ <b>Send me their Telegram ID or @Username:</b>", parse_mode="HTML")
+    """Alice waits for a name or ID 🥱"""
+    builder = InlineKeyboardBuilder()
+    builder.row(types.InlineKeyboardButton(text="❌ Cancel Search", callback_data="admin_cancel"))
+
+    await callback.message.answer(
+        "⌨️ <b>Send me their Telegram ID or @Username:</b>", 
+        parse_mode="HTML",
+        reply_markup=builder.as_markup()
+    )
     await state.set_state(AdminStates.waiting_for_search_query)
     await callback.answer()
 
 @router.message(AdminStates.waiting_for_search_query)
 async def process_admin_search(message: types.Message, state: FSMContext):
+    """Alice searches her memory for the user 🧠"""
     query = message.text.replace("@", "").strip()
     
     async with AsyncSessionLocal() as session:
@@ -125,14 +155,17 @@ async def process_admin_search(message: types.Message, state: FSMContext):
         user = result.scalar_one_or_none()
 
     if not user:
-        await message.answer("🤷‍♂️ <b>User not found in my memory.</b> 🥱", parse_mode="HTML")
-        return await state.clear()
+        # Provide feedback instead of silence
+        return await message.answer(
+            "🤷‍♂️ <b>User not found in my memory.</b>\nTry another ID or type /admin_panel to reset. 🥱",
+            parse_mode="HTML"
+        )
 
     builder = InlineKeyboardBuilder()
     status_text = "PRO ✅" if user.is_pro else "FREE 🆓"
     
     builder.row(types.InlineKeyboardButton(text="💎 Grant 30 Days Pro", callback_data=f"setpro_{user.tg_id}_30"))
-    builder.row(types.InlineKeyboardButton(text="🔙 Back to Search", callback_data="admin_search"))
+    builder.row(types.InlineKeyboardButton(text="🔙 Back to Panel", callback_data="admin_cancel"))
 
     await message.answer(
         f"👤 <b>User Found:</b>\n"
@@ -147,6 +180,7 @@ async def process_admin_search(message: types.Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("setpro_"))
 async def execute_pro_grant(callback: types.CallbackQuery):
+    """Alice officially grants the Pro status 💅"""
     data = callback.data.split("_")
     user_id = int(data[1])
     days = int(data[2])
@@ -160,7 +194,7 @@ async def execute_pro_grant(callback: types.CallbackQuery):
         )
         await session.commit()
 
-    await callback.answer(f"✅ User {user_id} is now Pro.", show_alert=True)
+    await callback.answer(f"✅ Success! User {user_id} is now Pro.", show_alert=True)
     
     try:
         await callback.bot.send_message(
@@ -173,6 +207,7 @@ async def execute_pro_grant(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "admin_stats")
 async def show_stats(callback: types.CallbackQuery):
+    """Alice checks the books 📊"""
     async with AsyncSessionLocal() as session:
         total_res = await session.execute(select(func.count(User.id)))
         pro_res = await session.execute(select(func.count(User.id)).where(User.is_pro == True))

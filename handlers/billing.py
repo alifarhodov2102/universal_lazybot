@@ -28,9 +28,11 @@ async def show_plans(message: types.Message):
     await message.answer(plan_details, parse_mode="HTML")
 
     # 2. Automated invoice for Telegram Stars
+    # 250 Stars = ~ $5.00 roughly matching your UZS price
     prices = [LabeledPrice(label="Pro Plan (30 days)", amount=250)]
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        # Pay button MUST be first and have pay=True
         [InlineKeyboardButton(text="✨ Pay with 250 Stars", pay=True)],
         [InlineKeyboardButton(text="📩 Send Receipt to Admin", url="https://t.me/lazyalice_admin")]
     ])
@@ -59,6 +61,7 @@ async def on_successful_payment(message: types.Message):
     expire_at = datetime.utcnow() + timedelta(days=30)
 
     async with AsyncSessionLocal() as session:
+        # Update user to Pro status immediately upon successful Star payment
         stmt = (
             update(User)
             .where(User.tg_id == tg_id)
@@ -88,16 +91,16 @@ async def check_status(message: types.Message):
     today = date.today()
     
     if user.is_pro:
-        # Check if Pro has expired
+        # 1. Check if Pro has expired
         if user.expiry_date and user.expiry_date < datetime.utcnow():
             status = "🚫 <b>Expired</b> (Time to pay Alice again, honey 💅)"
         else:
-            status = "✅ <b>Pro</b> (Unlimited RCs until: " + user.expiry_date.strftime('%d.%m.%Y') + ")"
+            status = f"✅ <b>Pro</b> (Unlimited RCs until: <b>{user.expiry_date.strftime('%d.%m.%Y')}</b>)"
     else:
-        # Calculate daily limit remaining
-        # Reset visual counter if it's a new day
+        # 2. Free User: Calculate daily limit remaining
+        # Reset visual counter in status if it's a new day
         current_daily = user.daily_requests if user.last_request_date == today else 0
         left = max(0, 10 - current_daily)
-        status = f"🆓 <b>Free Plan</b> ({left}/10 left today)"
+        status = f"🆓 <b>Free Plan</b> (<b>{left}/10</b> left today)"
 
-    await message.answer(f"❤️ <b>Current Status:</b> {status}", parse_mode="HTML")
+    await message.answer(f"❤️ <b>Current Status:</b>\n{status}", parse_mode="HTML")
