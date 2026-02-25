@@ -11,6 +11,8 @@ from sqlalchemy import select, update
 from database.models import User
 from database.connection import AsyncSessionLocal
 from utils.states import TemplateStates
+# Assuming you have an AI utility to handle the conversion
+# from utils.ai_utils import extract_template_structure 
 
 router = Router()
 
@@ -20,7 +22,6 @@ async def cmd_start(message: types.Message):
     tg_id = message.from_user.id
     full_name = message.from_user.full_name
 
-    # Initial loading message
     status_msg = await message.answer("⏳ <b>Checking your access...</b>", parse_mode=ParseMode.HTML)
 
     async with AsyncSessionLocal() as session:
@@ -28,7 +29,6 @@ async def cmd_start(message: types.Message):
         result = await session.execute(stmt)
         user = result.scalar_one_or_none()
 
-        # 1. Register new user if not in database
         if not user:
             user = User(
                 tg_id=tg_id,
@@ -49,9 +49,7 @@ async def cmd_start(message: types.Message):
                 "💰 <b>Daily Limit:</b> 10 free RCs every day."
             )
         else:
-            # 2. Show status for returning users
             today = date.today()
-            # Reset visual counter if it's a new day
             current_reqs = user.daily_requests if user.last_request_date == today else 0
             
             if user.is_pro:
@@ -78,7 +76,8 @@ async def cmd_set_template(message: types.Message, state: FSMContext):
     guide = (
         "⚙️ <b>Teach Me Your Style!</b>\n\n"
         "Simply <b>Paste</b> a previous load message that you liked.\n\n"
-        "My AI will learn the format and apply it to all your future PDFs automatically.\n\n"
+        "Alice will automatically keep your notes and structure, but replace the "
+        "specific details with blanks for new PDFs! 🧠\n\n"
         "⚠️ <i>Must be at least 20 characters long.</i> 🥱💅"
     )
     await message.answer(guide, parse_mode=ParseMode.HTML, reply_markup=builder.as_markup())
@@ -86,30 +85,47 @@ async def cmd_set_template(message: types.Message, state: FSMContext):
 
 @router.message(TemplateStates.waiting_for_template, F.text)
 async def process_template(message: types.Message, state: FSMContext):
-    """Alice processes the example with validation 🧠"""
-    new_tmpl = message.text
+    """Alice extracts the skeleton from the user example 🧠"""
+    example_text = message.text
     
-    # Check if user tried to send a command or text that is too short
-    if len(new_tmpl) < 20 or new_tmpl.startswith("/"):
+    if len(example_text) < 20 or example_text.startswith("/"):
         return await message.answer(
-            "🙄 <b>That's not a template, honey.</b>\n\n"
-            "Please paste a <b>real example</b> of a load message (at least 20 characters) "
-            "so I can learn your style. Or press Cancel above. 💅",
+            "🙄 <b>I need a real example, honey.</b>\n\n"
+            "Paste a full load message (at least 20 characters) so I can see "
+            "where the broker, rate, and notes are. 💅",
             parse_mode=ParseMode.HTML
         )
 
+    status_msg = await message.answer("🧠 <b>Alice is analyzing the structure...</b>", parse_mode="HTML")
+
+    # This prompt tells the AI to create a skeleton while preserving notes
+    # You would pass this to your LLM (DeepSeek/OpenAI)
+    system_prompt = (
+        "Convert this logistics load message into a Jinja2 template. "
+        "Replace specific data with: {{ broker }}, {{ load_number }}, {{ rate }}, "
+        "{{ total_miles }}, {{ pickup_info }}, {{ delivery_info }}. "
+        "STRICT RULE: KEEP all emojis, decorative lines, and fixed policy notes "
+        "(like charges or trailer photo rules) EXACTLY as they are. "
+        "Output ONLY the template text."
+    )
+
+    # placeholder for your AI call: 
+    # skeleton_template = await extract_template_structure(system_prompt, example_text)
+    
+    # For demonstration, we assume the AI returns the 'skeleton' version of their text
+    skeleton_template = example_text # Replace this with the actual AI output variable
+
     async with AsyncSessionLocal() as session:
         await session.execute(
-            update(User).where(User.tg_id == message.from_user.id).values(template_text=new_tmpl)
+            update(User).where(User.tg_id == message.from_user.id).values(template_text=skeleton_template)
         )
         await session.commit()
 
-    await message.answer("✅ <b>Masterpiece Created!</b>\nI've learned your style. Send me a PDF to test it! 🥱💅", parse_mode="HTML")
+    await status_msg.edit_text("✅ <b>Template Learnt!</b>\nI've kept your notes and structure. Send me a PDF to test it! 🥱💅", parse_mode="HTML")
     await state.clear()
 
 @router.callback_query(F.data == "cancel_template")
 async def cancel_template(callback: types.CallbackQuery, state: FSMContext):
-    """Alice stops caring about your style 🙄"""
     await state.clear()
     await callback.message.edit_text("🔄 <b>Setup cancelled.</b> I'll keep using my default style. 💅", parse_mode="HTML")
     await callback.answer()
@@ -138,17 +154,20 @@ async def cmd_reset_template(message: types.Message):
 @router.message(Command("help"))
 async def cmd_help(message: types.Message):
     help_text = (
-        "❓ <b>Need help, honey?</b>\n\n"
+        "❓ <b>How can I help, honey?</b>\n\n"
         "📍 <b>Bot not working?</b> Make sure you send a PDF, not a photo.\n"
-        "📍 <b>Want custom format?</b> Use /set_template and paste an example.\n"
-        "📍 <b>Daily Limit:</b> You get 10 free RCs every day.\n"
-        "📍 <b>Pro Plan:</b> Use /plans for unlimited access.\n\n"
+        "📍 <b>Custom format?</b> Use /set_template and paste a previous load message.\n"
+        "📍 <b>Daily Limit:</b> 10 free extractions per day.\n\n"
         "Support: @lazyalice_admin 🥱"
     )
     await message.answer(help_text, parse_mode=ParseMode.HTML)
 
 @router.message(F.text & ~F.text.startswith("/"))
-async def sassy_chat(message: types.Message):
+async def sassy_chat(message: types.Message, state: FSMContext):
+    # Only trigger sassy chat if we aren't waiting for a template
+    if await state.get_state() is not None:
+        return
+
     responses = [
         "🙄 I'm a bot, not your therapist. Send me a PDF.",
         "💅 Only PDFs get my attention, honey.",
