@@ -98,13 +98,13 @@ async def process_template(message: types.Message, state: FSMContext):
 
     status_msg = await message.answer("🧠 <b>Alice is stripping the old data...</b>", parse_mode="HTML")
 
-    # IMPROVED PROMPT: Specifically targets dates and times for removal
+    # UNIFIED PROMPT: Forces Name, Address, and Time into single info blocks
     system_prompt = (
-        "You are a template generator for a logistics bot. Convert this load message into a Jinja2 template. "
+        "Convert this logistics load message into a Jinja2 template. "
         "REPLACE specific dynamic data with these tags: {{ broker }}, {{ load_number }}, {{ rate }}, {{ total_miles }}. "
-        "FOR STOPS: Replace the entire facility name, address, and DATE/TIME blocks with these tags: "
+        "FOR STOPS: Replace the entire facility name, address, and DATE/TIME blocks with a SINGLE tag: "
         "PU1: {{ pickup_info }} and DEL1: {{ delivery_info }}. "
-        "CRITICAL: Do NOT leave any real dates (like 10/14/25) or times (0600) in the template. "
+        "CRITICAL: Do NOT create separate tags for time (like {{ pickup_time }}). All stop details must go into the _info tag. "
         "KEEP all emojis, decorative lines (───), and fixed policy notes exactly as they are. "
         "Output ONLY the resulting template text."
     )
@@ -119,7 +119,7 @@ async def process_template(message: types.Message, state: FSMContext):
             )
             await session.commit()
 
-        await status_msg.edit_text("✅ <b>Skeleton Learnt!</b>\nI've cleared the old dates and info. I'm ready for new PDFs. 🥱💅", parse_mode="HTML")
+        await status_msg.edit_text("✅ <b>Skeleton Learnt!</b>\nI've unified your stop info so everything fits perfectly. 🥱💅", parse_mode="HTML")
     except Exception as e:
         await status_msg.edit_text("🙄 <b>My brain stalled...</b> Please try pasting the example again.")
     
