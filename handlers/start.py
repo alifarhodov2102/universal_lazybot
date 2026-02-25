@@ -98,7 +98,7 @@ async def process_template(message: types.Message, state: FSMContext):
 
     status_msg = await message.answer("🧠 <b>Alice is stripping the old data...</b>", parse_mode="HTML")
 
-    # SIMPLE & STRICT PROMPT: Forces AI to replace the first line and stop blocks
+    # ENHANCED PROMPT: Targets per_mile and duration for dynamic calculation
     system_prompt = (
         "You are a logistics template engine. Convert this load message into a Jinja2 skeleton. "
         "STRICT RULES:\n"
@@ -108,8 +108,10 @@ async def process_template(message: types.Message, state: FSMContext):
         "   PU1: {{ pickup_info }}\n"
         "   DEL1: {{ delivery_info }}\n"
         "4. REPLACE the rate and miles values with: {{ rate }} and {{ total_miles }}\n"
-        "5. KEEP all emojis, lines (───), and fixed policy notes exactly as they are.\n"
-        "6. Output ONLY the resulting template text."
+        "5. REPLACE any 'Per mile' value with: {{ per_mile }}\n"
+        "6. REPLACE any 'Duration' value with: {{ duration }}\n"
+        "7. KEEP all emojis, lines (───), and fixed policy notes exactly as they are.\n"
+        "8. Output ONLY the resulting template text."
     )
 
     try:
