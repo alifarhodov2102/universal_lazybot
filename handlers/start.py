@@ -98,15 +98,18 @@ async def process_template(message: types.Message, state: FSMContext):
 
     status_msg = await message.answer("🧠 <b>Alice is stripping the old data...</b>", parse_mode="HTML")
 
-    # UNIFIED PROMPT: Forces Name, Address, and Time into single info blocks
+    # SIMPLE & STRICT PROMPT: Forces AI to replace the first line and stop blocks
     system_prompt = (
-        "Convert this logistics load message into a Jinja2 template. "
-        "REPLACE specific dynamic data with these tags: {{ broker }}, {{ load_number }}, {{ rate }}, {{ total_miles }}. "
-        "FOR STOPS: Replace the entire facility name, address, and DATE/TIME blocks with a SINGLE tag: "
-        "PU1: {{ pickup_info }} and DEL1: {{ delivery_info }}. "
-        "CRITICAL: Do NOT create separate tags for time (like {{ pickup_time }}). All stop details must go into the _info tag. "
-        "KEEP all emojis, decorative lines (───), and fixed policy notes exactly as they are. "
-        "Output ONLY the resulting template text."
+        "You are a logistics template engine. Convert this load message into a Jinja2 skeleton. "
+        "STRICT RULES:\n"
+        "1. REPLACE the very first line (Broker Name) with: {{ broker }}\n"
+        "2. REPLACE the load number value with: {{ load_number }}\n"
+        "3. REPLACE the entire PU1 and DEL1 blocks (Facility, Address, and Time) with:\n"
+        "   PU1: {{ pickup_info }}\n"
+        "   DEL1: {{ delivery_info }}\n"
+        "4. REPLACE the rate and miles values with: {{ rate }} and {{ total_miles }}\n"
+        "5. KEEP all emojis, lines (───), and fixed policy notes exactly as they are.\n"
+        "6. Output ONLY the resulting template text."
     )
 
     try:
@@ -119,7 +122,7 @@ async def process_template(message: types.Message, state: FSMContext):
             )
             await session.commit()
 
-        await status_msg.edit_text("✅ <b>Skeleton Learnt!</b>\nI've unified your stop info so everything fits perfectly. 🥱💅", parse_mode="HTML")
+        await status_msg.edit_text("✅ <b>Skeleton Learnt!</b>\nI've cleared the old info. I'm ready for new PDFs. 🥱💅", parse_mode="HTML")
     except Exception as e:
         await status_msg.edit_text("🙄 <b>My brain stalled...</b> Please try pasting the example again.")
     

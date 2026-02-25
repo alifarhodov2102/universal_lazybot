@@ -1,34 +1,22 @@
 from jinja2 import Template, exceptions
 import re
 
-# Alice fixed the template to ensure every bold tag is closed properly 💅
+# Alice's default style remains a backup 💅
 DEFAULT_TEMPLATE = """
 <b>{{ broker }}</b>
 
 <b>Load#</b> {{ load_number }}
 
-{% for p in pickups -%}
-<b>PU{{ loop.index }}:</b> {{ p.facility }}
-{{ p.address }}
-{% if p.time %}<b>TIME:</b> {{ p.time }}{% endif %}
-—————————————
-{% endfor -%}
+<b>PU1:</b> {{ pickup_info }}
 
-{% for d in deliveries -%}
-<b>DEL{{ loop.index }}:</b> {{ d.facility }}
-{{ d.address }}
-{% if d.time %}<b>TIME:</b> {{ d.time }}{% endif %}
-{% if not loop.last %}—————————————{% endif %}
-{% endfor %}
+<b>DEL1:</b> {{ delivery_info }}
 
 <b>TOTAL MILES:</b> {{ total_miles }}
 <b>RATE:</b> {{ rate }}
 """
 
 def _format_address(addr: str) -> str:
-    """
-    Alice makes the address readable so dispatchers don't get a headache.
-    """
+    """Alice makes the address readable so dispatchers don't get a headache."""
     if not addr:
         return ""
     addr = addr.strip()
@@ -40,44 +28,54 @@ def _format_address(addr: str) -> str:
     
     return addr
 
+def _build_stop_string(stop_list: list) -> str:
+    """Combines all details into one 'info' string for the new skeleton style 🧠"""
+    if not stop_list:
+        return "N/A"
+    
+    stop = stop_list[0] # Focus on first stop for simple templates
+    facility = stop.get("facility", "").strip()
+    address = _format_address(stop.get("address", ""))
+    time = stop.get("time", "").strip()
+    
+    # Build the block: Facility, Address, and Time on separate lines
+    parts = []
+    if facility: parts.append(facility)
+    if address: parts.append(address)
+    if time: parts.append(f"TIME: {time}")
+    
+    return "\n".join(parts)
+
 def render_result(data: dict, user_template: str = None) -> str:
-    """
-    Converts raw JSON into a beautifully formatted Telegram message 🥱.
-    """
-    # 1. Clean up the data before Alice touches it
+    """Converts raw JSON into a beautifully formatted Telegram message 🥱."""
+    
+    # 1. Create the unified info blocks for the user's custom skeleton
+    pickup_info = _build_stop_string(data.get("pickups", []))
+    delivery_info = _build_stop_string(data.get("deliveries", []))
+
+    # 2. Clean up the basic data
     clean_data = {
         "broker": (data.get("broker") or "Rate Confirmation").strip(),
         "load_number": (data.get("load_number") or "N/A").strip(),
         "rate": (data.get("rate") or "N/A").strip(),
         "total_miles": (data.get("total_miles") or "N/A"),
-        "pickups": [
-            {
-                "facility": (p.get("facility") or "").strip(),
-                "address": _format_address(p.get("address")),
-                "time": (p.get("time") or "").strip()
-            } for p in data.get("pickups", [])
-        ],
-        "deliveries": [
-            {
-                "facility": (d.get("facility") or "").strip(),
-                "address": _format_address(d.get("address")),
-                "time": (d.get("time") or "").strip()
-            } for d in data.get("deliveries", [])
-        ]
+        "pickup_info": pickup_info,
+        "delivery_info": delivery_info,
+        # Keep lists as fallback for users with advanced loop templates
+        "pickups": data.get("pickups", []),
+        "deliveries": data.get("deliveries", [])
     }
 
-    # 2. Pick the winning template
+    # 3. Pick the winning template
     tmpl_str = user_template if user_template else DEFAULT_TEMPLATE
 
     try:
-        # 3. Let Alice work her magic 💅
-        # We use a strict template to ensure no broken HTML is generated
+        # 4. Let Alice work her magic 💅
         template = Template(tmpl_str)
         rendered_text = template.render(**clean_data)
         
-        # Remove any triple-newline "accidents" to keep it tight
+        # Remove triple-newlines to keep it clean
         return re.sub(r'\n{3,}', '\n\n', rendered_text).strip()
     
     except exceptions.TemplateError as e:
-        # Even the error message is bolded for you 🥱
         return f"⚠️ <b>Template Error:</b> {str(e)}\n\nDon't break my code, honey. 💅"
