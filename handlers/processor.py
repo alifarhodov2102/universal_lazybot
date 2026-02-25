@@ -7,6 +7,7 @@ from aiogram import Router, types, F, Bot
 from sqlalchemy import select, update
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.enums import ParseMode
+from aiogram.fsm.context import FSMContext
 
 from database.connection import AsyncSessionLocal
 from database.models import User
@@ -43,7 +44,10 @@ async def check_and_update_limit(uid: int) -> tuple[bool, int]:
         if user.last_request_date < today:
             user.daily_requests = 0
             user.last_request_date = today
+            # Commit the reset immediately
             await session.commit()
+            # Refresh user object
+            await session.refresh(user)
         
         if user.daily_requests >= 10:
             return False, 0
@@ -60,7 +64,8 @@ async def safe_edit_status(bot: Bot, chat_id: int, message_id: int, new_text: st
         return await bot.edit_message_text(
             text=new_text,
             chat_id=chat_id,
-            message_id=message_id
+            message_id=message_id,
+            parse_mode=ParseMode.HTML
         )
     except TelegramBadRequest as e:
         if "message is not modified" in str(e).lower():
@@ -84,7 +89,7 @@ async def process_user_queue(uid: int, bot: Bot):
 
             try:
                 # 1. Processing starts (15%)
-                await safe_edit_status(bot, chat_id, msg_id, "📄 Downloading this boring PDF... [15%]")
+                await safe_edit_status(bot, chat_id, msg_id, "📄 <b>Downloading this boring PDF...</b> [15%]")
                 
                 file = await bot.get_file(file_id)
                 raw = await bot.download_file(file.file_path)
@@ -99,7 +104,7 @@ async def process_user_queue(uid: int, bot: Bot):
                     user = res.scalar_one_or_none()
 
                     # 2. Extraction (45%)
-                    await safe_edit_status(bot, chat_id, msg_id, "🔍 Reading the tiny text for you... [45%]")
+                    await safe_edit_status(bot, chat_id, msg_id, "🔍 <b>Reading the tiny text for you...</b> [45%]")
                     text = await extract_text_async(tmp_path)
                     
                     # 3. AI Task
@@ -110,18 +115,19 @@ async def process_user_queue(uid: int, bot: Bot):
                         if percent < 95:
                             percent += 5
                             quotes = [
-                                f"🧠 Thinking is hard... [{percent}%]",
-                                f"☕ My coffee is getting cold... [{percent}%]",
-                                f"💅 Almost done, don't rush me... [{percent}%]"
+                                f"🧠 <b>Thinking is hard...</b> [{percent}%]",
+                                f"☕ <b>My coffee is getting cold...</b> [{percent}%]",
+                                f"💅 <b>Almost done, don't rush me...</b> [{percent}%]"
                             ]
                             idx = (percent // 10) % len(quotes)
                             await safe_edit_status(bot, chat_id, msg_id, quotes[idx])
                         await asyncio.sleep(1.5)
                     
                     data = await ai_task
-                    await safe_edit_status(bot, chat_id, msg_id, "✨ Finally! Here it is. [100%]")
+                    await safe_edit_status(bot, chat_id, msg_id, "✨ <b>Finally! Here it is.</b> [100%]")
 
-                    # 4. Rendering (Fixed to match our HTML renderer) 💅
+                    # 4. Rendering logic 💅
+                    # Uses render_result to fill variables into user's custom template
                     formatted_output = render_result(data, user.template_text if user else None)
                     
                     await bot.send_message(
@@ -131,7 +137,7 @@ async def process_user_queue(uid: int, bot: Bot):
                     )
 
             except Exception as e:
-                await bot.send_message(chat_id, f"🙄 Ugh, even I can't fix this error: {str(e)}")
+                await bot.send_message(chat_id, f"🙄 <b>Ugh, even I can't fix this error:</b>\n<code>{str(e)}</code>")
             
             finally:
                 try: await bot.delete_message(chat_id, msg_id)
@@ -159,7 +165,8 @@ async def handle_pdf(message: types.Message, bot: Bot):
         )
 
     # 2. Add to Queue and start Worker
-    initial_msg = await message.answer(f"👀 I woke up... let me look at your RC. ({left} left today) 🥱")
+    left_text = "Unlimited" if left == 999 else f"{left} left today"
+    initial_msg = await message.answer(f"👀 <b>I woke up... let me look at your RC.</b> ({left_text}) 🥱")
 
     if uid not in user_queues:
         user_queues[uid] = asyncio.Queue()
@@ -174,7 +181,13 @@ async def handle_pdf(message: types.Message, bot: Bot):
         user_workers[uid] = asyncio.create_task(process_user_queue(uid, bot))
 
 @router.message(F.text & ~F.text.startswith("/"))
-async def sassy_chat(message: types.Message):
+async def sassy_chat(message: types.Message, state: FSMContext):
+    """Alice is only sassy when she isn't busy with Admin or Templates 💅"""
+    # Guard: If user is in an active state (Broadcast/Search/Template), do nothing!
+    current_state = await state.get_state()
+    if current_state is not None:
+        return
+
     responses = [
         "🙄 I'm a bot, not your therapist. Send me a PDF or leave me alone.",
         "💅 Don't try to text me. Only PDFs get my attention.",
