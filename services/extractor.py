@@ -77,19 +77,28 @@ def regex_extract(text: str) -> dict:
     return data
 
 async def get_miles_free(origin: str, destination: str) -> str:
+    """Alice calculates distance if the PDF is being lazy. 🗺️"""
     if not origin or not destination: return ""
-    logger.info(f"OSRM: Calculating miles... my poor brain 🧠")
+    
+    # Logic: Strip known facility name patterns to help Nominatim find the address
+    # Ryan Transportation often puts facility names inside the address block.
+    clean_origin = re.sub(r'^.*?DC\s|.*?RESUPPLY\s|.*?FPDC\s', '', origin, flags=re.I).strip()
+    clean_dest = re.sub(r'^.*?DC\s|.*?RESUPPLY\s|.*?FPDC\s', '', destination, flags=re.I).strip()
+
+    logger.info(f"OSRM: Routing between {clean_origin} and {clean_dest} 🧠")
+    
     try:
         async with httpx.AsyncClient() as client:
             async def get_coords(addr):
+                # Using Nominatim for Geocoding
                 url = f"[https://nominatim.openstreetmap.org/search?q=](https://nominatim.openstreetmap.org/search?q=){addr}&format=json&limit=1"
-                r = await client.get(url, headers={"User-Agent": "LazyBot_Logistics/2.0"}, timeout=10)
+                r = await client.get(url, headers={"User-Agent": "LazyBot_Logistics/2.0"}, timeout=15)
                 if r.status_code == 200 and r.json():
                     return r.json()[0]["lat"], r.json()[0]["lon"]
                 return None
 
-            o_coords = await get_coords(origin)
-            d_coords = await get_coords(destination)
+            o_coords = await get_coords(clean_origin)
+            d_coords = await get_coords(clean_dest)
 
             if o_coords and d_coords:
                 osrm_url = f"[http://router.project-osrm.org/route/v1/driving/](http://router.project-osrm.org/route/v1/driving/){o_coords[1]},{o_coords[0]};{d_coords[1]},{d_coords[0]}?overview=false"
@@ -160,6 +169,7 @@ async def smart_extract(text: str) -> dict:
     if not data:
         data = regex_extract(text)
     
+    # Logic: Verify and calculate miles if AI missed it (common with Ryan/McLeod PDFs)
     if not data.get("total_miles") or data["total_miles"] in ["", "N/A", "0"]:
         if data.get("pickups") and data.get("deliveries"):
             origin = data["pickups"][0]["address"]
