@@ -11,7 +11,7 @@ from sqlalchemy import select, update
 from database.models import User
 from database.connection import AsyncSessionLocal
 from utils.states import TemplateStates
-# This is the AI utility you need to call to clean the driver's input
+# This is the AI utility that communicates with DeepSeek
 from services.extractor import extract_template_structure 
 
 router = Router()
@@ -96,15 +96,17 @@ async def process_template(message: types.Message, state: FSMContext):
             parse_mode=ParseMode.HTML
         )
 
-    status_msg = await message.answer("🧠 <b>Alice is analyzing your structure...</b>", parse_mode="HTML")
+    status_msg = await message.answer("🧠 <b>Alice is stripping the old data...</b>", parse_mode="HTML")
 
-    # Prompt instructing AI to preserve notes but replace dynamic data with variables
+    # IMPROVED PROMPT: Specifically targets dates and times for removal
     system_prompt = (
         "You are a template generator for a logistics bot. Convert this load message into a Jinja2 template. "
-        "Replace specific data with: {{ broker }}, {{ load_number }}, {{ rate }}, "
-        "{{ total_miles }}, {{ pickup_info }}, {{ delivery_info }}. "
-        "CRITICAL: KEEP all emojis, decorative lines, and fixed policy notes (like late fees) exactly as they are. "
-        "Do NOT keep the specific names or numbers from the example. Output ONLY the resulting template text."
+        "REPLACE specific dynamic data with these tags: {{ broker }}, {{ load_number }}, {{ rate }}, {{ total_miles }}. "
+        "FOR STOPS: Replace the entire facility name, address, and DATE/TIME blocks with these tags: "
+        "PU1: {{ pickup_info }} and DEL1: {{ delivery_info }}. "
+        "CRITICAL: Do NOT leave any real dates (like 10/14/25) or times (0600) in the template. "
+        "KEEP all emojis, decorative lines (───), and fixed policy notes exactly as they are. "
+        "Output ONLY the resulting template text."
     )
 
     try:
@@ -117,7 +119,7 @@ async def process_template(message: types.Message, state: FSMContext):
             )
             await session.commit()
 
-        await status_msg.edit_text("✅ <b>Template Learnt!</b>\nI've kept your notes and lines, but I'll fill in the load info for new PDFs. 🥱💅", parse_mode="HTML")
+        await status_msg.edit_text("✅ <b>Skeleton Learnt!</b>\nI've cleared the old dates and info. I'm ready for new PDFs. 🥱💅", parse_mode="HTML")
     except Exception as e:
         await status_msg.edit_text("🙄 <b>My brain stalled...</b> Please try pasting the example again.")
     
