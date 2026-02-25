@@ -1,6 +1,4 @@
 import os
-import re
-import json
 import httpx
 import logging
 from aiogram import Router, types, F
@@ -22,6 +20,7 @@ async def ai_parse_template(example_text: str) -> str:
     fully functional Jinja2 template. 🥱💅
     """
     if not DEEPSEEK_API_KEY:
+        logger.warning("DeepSeek API Key missing. Falling back to raw text.")
         return None
 
     prompt = f"""
@@ -29,12 +28,12 @@ You are a US Logistics Bot Assistant. A user provided a text example of how they
 Convert this example into a clean Jinja2 template for a bot.
 
 Rules:
-1. Replace Broker Name with {{ broker }}
-2. Replace Load ID/Number with {{ load_number }}
-3. Replace Money/Pay with {{ rate }}
-4. Replace Total Miles with {{ total_miles }}
-5. For Pickup blocks, use: {{% for p in pickups %}} ... {{ p.facility }}, {{ p.address }}, {{ p.time }} ... {{% endfor %}}
-6. For Delivery blocks, use: {{% for d in deliveries %}} ... {{ d.facility }}, {{ d.address }}, {{ d.time }} ... {{% endfor %}}
+1. Replace Broker Name with {{{{ broker }}}}
+2. Replace Load ID/Number with {{{{ load_number }}}}
+3. Replace Money/Pay with {{{{ rate }}}}
+4. Replace Total Miles with {{{{ total_miles }}}}
+5. For Pickup blocks, use: {{% for p in pickups %}} ... {{{{ p.facility }}}}, {{{{ p.address }}}}, {{{{ p.time }}}} ... {{% endfor %}}
+6. For Delivery blocks, use: {{% for d in deliveries %}} ... {{{{ d.facility }}}}, {{{{ d.address }}}}, {{{{ d.time }}}} ... {{% endfor %}}
 7. Maintain the user's emojis and spacing exactly.
 
 USER EXAMPLE:
@@ -58,7 +57,10 @@ OUTPUT ONLY THE CLEAN JINJA2 CODE:
                 timeout=30.0
             )
             result = response.json()
-            return result['choices'][0]['message']['content'].strip()
+            # Handle potential markdown code blocks in AI response
+            content = result['choices'][0]['message']['content'].strip()
+            clean_content = content.replace("```jinja2", "").replace("```html", "").replace("```", "").strip()
+            return clean_content
         except Exception as e:
             logger.error(f"AI Template Error: {e}")
             return None

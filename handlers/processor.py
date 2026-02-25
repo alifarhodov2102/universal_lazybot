@@ -2,10 +2,10 @@ import os
 import tempfile
 import asyncio
 import random
+from datetime import date
 from aiogram import Router, types, F, Bot
 from sqlalchemy import select, update
 from aiogram.exceptions import TelegramBadRequest
-# Professional logic requires correct enum usage 🥱
 from aiogram.enums import ParseMode
 
 from database.connection import AsyncSessionLocal
@@ -19,6 +19,40 @@ router = Router()
 
 user_queues: dict[int, asyncio.Queue] = {}
 user_workers: dict[int, asyncio.Task] = {}
+
+async def check_and_update_limit(uid: int) -> tuple[bool, int]:
+    """
+    Checks if a user has daily quota left. 
+    Resets the counter to 0 if the last_request_date is from a previous day. 🥱💅
+    """
+    async with AsyncSessionLocal() as session:
+        stmt = select(User).where(User.tg_id == uid)
+        res = await session.execute(stmt)
+        user = res.scalar_one_or_none()
+        
+        if not user:
+            return False, 0
+            
+        # Admins and Pro users have no limits
+        if uid in ADMIN_IDS or user.is_pro:
+            return True, 999
+
+        today = date.today()
+        
+        # Reset logic: If it's a new day, clear the daily_requests
+        if user.last_request_date < today:
+            user.daily_requests = 0
+            user.last_request_date = today
+            await session.commit()
+        
+        if user.daily_requests >= 10:
+            return False, 0
+            
+        # Increment request count
+        user.daily_requests += 1
+        await session.commit()
+        
+        return True, (10 - user.daily_requests)
 
 async def safe_edit_status(bot: Bot, chat_id: int, message_id: int, new_text: str):
     """Alice checks if she actually has something new to say before talking 💅"""
@@ -90,19 +124,11 @@ async def process_user_queue(uid: int, bot: Bot):
                     # 4. Rendering (Fixed to match our HTML renderer) 💅
                     formatted_output = render_result(data, user.template_text if user else None)
                     
-                    # TUZATISH: Endi bu Markdown emas, HTML!
                     await bot.send_message(
                         chat_id, 
                         formatted_output, 
-                        parse_mode=ParseMode.HTML # This makes <b> tags work 💅
+                        parse_mode=ParseMode.HTML
                     )
-
-                    # 5. Limit management
-                    if uid not in ADMIN_IDS and user and not user.is_pro:
-                        await session.execute(
-                            update(User).where(User.tg_id == uid).values(free_uses=user.free_uses - 1)
-                        )
-                        await session.commit()
 
             except Exception as e:
                 await bot.send_message(chat_id, f"🙄 Ugh, even I can't fix this error: {str(e)}")
@@ -120,23 +146,20 @@ async def process_user_queue(uid: int, bot: Bot):
 @router.message(F.document.mime_type == "application/pdf")
 async def handle_pdf(message: types.Message, bot: Bot):
     uid = message.from_user.id
-    is_admin = uid in ADMIN_IDS
+    
+    # 1. Verify User and Check Daily Limits
+    allowed, left = await check_and_update_limit(uid)
+    
+    if not allowed:
+        return await message.answer(
+            "💸 <b>Daily Limit Reached!</b>\n\n"
+            "You've used your 10 free RCs for today. "
+            "Wait until tomorrow or upgrade to /plans now. 💅",
+            parse_mode=ParseMode.HTML
+        )
 
-    async with AsyncSessionLocal() as session:
-        stmt = select(User).where(User.tg_id == uid)
-        res = await session.execute(stmt)
-        user = res.scalar_one_or_none()
-
-        if not user and not is_admin:
-             return await message.answer("👋 Hey! Use /start first. I don't talk to strangers.")
-
-        if not is_admin and user and not user.is_pro and user.free_uses <= 0:
-            return await message.answer(
-                "💸 You're out of freebies, honey. Get /plans if you want me to keep working."
-            )
-
-    # Instant response
-    initial_msg = await message.answer("👀 I woke up... let me look at your RC. 🥱")
+    # 2. Add to Queue and start Worker
+    initial_msg = await message.answer(f"👀 I woke up... let me look at your RC. ({left} left today) 🥱")
 
     if uid not in user_queues:
         user_queues[uid] = asyncio.Queue()
@@ -158,5 +181,4 @@ async def sassy_chat(message: types.Message):
         "🥱 Talking is exhausting. Just send the Rate Confirmation already.",
         "🚫 Too many words, not enough PDF. Move along, honey."
     ]
-    # Sassy responses deserve HTML too, just in case 💅
     await message.reply(random.choice(responses), parse_mode=ParseMode.HTML)

@@ -1,5 +1,5 @@
-from sqlalchemy import Column, Integer, BigInteger, String, Boolean, DateTime, Text
-from datetime import datetime
+from sqlalchemy import Column, Integer, BigInteger, String, Boolean, DateTime, Text, Date
+from datetime import datetime, date
 from .connection import Base
 
 class User(Base):
@@ -9,18 +9,16 @@ class User(Base):
     tg_id = Column(BigInteger, unique=True, nullable=False)
     username = Column(String, nullable=True)
     
-    # 2 ta bepul urinish (Default)
-    free_uses = Column(Integer, default=2)
+    # --- 10 RC Daily Limit Logic 💅 ---
+    daily_requests = Column(Integer, default=0)
+    last_request_date = Column(Date, default=date.today)
     
-    # Pro holati
     is_pro = Column(Boolean, default=False)
     expiry_date = Column(DateTime, nullable=True)
     
-    # Userning shaxsiy formati (Jinja2 uchun)
-    # Agar bu bo'sh bo'lsa, default format ishlatiladi
+    # Custom Jinja2 Template
     template_text = Column(Text, nullable=True)
-    
     created_at = Column(DateTime, default=datetime.utcnow)
 
     def __repr__(self):
-        return f"<User {self.tg_id} - Pro: {self.is_pro}>"
+        return f"<User {self.tg_id} - {self.daily_requests}/10 RCs used today>"
