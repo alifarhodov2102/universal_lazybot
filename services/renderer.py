@@ -22,16 +22,15 @@ def _format_address(addr: str) -> str:
     if not addr:
         return ""
     
-    # Remove potential facility names repeating in the address line
     addr = addr.strip()
     
-    # Split logic: looks for the last comma which usually separates Street from City
+    # Split logic: look for the last comma which usually separates Street from City
     if "," in addr:
-        # Split once from the right to separate "City, ST Zip" from "Street"
+        # We split from the right to separate the "City, ST Zip" part
         parts = addr.rsplit(",", 1)
         street = parts[0].strip()
-        city_part = parts[1].strip()
-        return f"{street},\n{city_state_zip}"
+        location = parts[1].strip() # This is the City, State Zip part
+        return f"{street},\n{location}"
         
     return addr
 
@@ -55,11 +54,11 @@ def _build_stop_string(stop_list: list) -> str:
 def render_result(data: dict, user_template: str = None) -> str:
     """Converts raw JSON into a beautifully formatted Telegram message 🥱."""
     
-    # 1. Handle Miles formatting (ensure it says 'mi' if it's a number)
+    # 1. Handle Miles formatting
     miles = data.get("total_miles")
     if miles and str(miles).replace('.', '', 1).isdigit():
         miles = f"{miles} mi"
-    elif not miles or miles == "0":
+    elif not miles or miles == "0" or miles == "N/A":
         miles = "N/A"
 
     # 2. Create the unified info blocks
