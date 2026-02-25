@@ -145,3 +145,4 @@ def render_result(data: dict, user_template: str = None) -> str:
     
     except exceptions.TemplateError as e:
         return f"⚠️ <b>Template Error:</b> {str(e)}\n\nDon't break my code, honey. 💅"
+    
