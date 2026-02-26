@@ -58,13 +58,13 @@ async def get_miles_free(origin: str, destination: str) -> str:
     if not origin or not destination: return ""
     
     def clean_for_map(addr):
-        # 1. Remove Facility Prefixes 
-        addr = re.sub(r'^(?:FMC|JASPER|ARMSTRONG|PLANT \d+|DC|RESUPPLY|FPDC|WAREHOUSE|LOGISTICS|NAME:)\s+', '', addr, flags=re.I)
-        # 2. Fix Duplicate Address Lines (e.g., 109 Poland Spring Dr, 109 Poland Spring Dr) 
-        parts = [p.strip() for p in addr.split(",")]
+        # 1. Remove Facility Prefixes and noise
+        addr = re.sub(r'^(?:FMC|JASPER|ARMSTRONG|PLANT \d+|DC|RESUPPLY|FPDC|WAREHOUSE|LOGISTICS|NAME:|ADDRESS:)\s+', '', addr, flags=re.I)
+        # 2. Fix Duplicate Address Lines by splitting and picking unique parts
+        parts = [p.strip() for p in addr.replace('\n', ',').split(",")]
         unique_parts = []
         for p in parts:
-            if p not in unique_parts: unique_parts.append(p)
+            if p and p not in unique_parts: unique_parts.append(p)
         return ", ".join(unique_parts)
 
     o_addr = clean_for_map(origin)
@@ -73,7 +73,6 @@ async def get_miles_free(origin: str, destination: str) -> str:
     try:
         async with httpx.AsyncClient() as client:
             async def get_coords(addr):
-                # We use a proper URL to avoid bracket noise 
                 url = f"https://nominatim.openstreetmap.org/search?q={addr}&format=json&limit=1"
                 r = await client.get(url, headers={"User-Agent": "LazyBot_Logistics/2.0"}, timeout=15)
                 if r.status_code == 200 and r.json():

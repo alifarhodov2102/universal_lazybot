@@ -16,23 +16,21 @@ DEFAULT_TEMPLATE = """
 """
 
 def _format_address(addr: str) -> str:
-    """Alice makes the address readable by forcing City, State Zip to a new line. 💅"""
-    if not addr:
-        return ""
+    if not addr: return ""
     
-    addr = addr.strip()
-    parts = [p.strip() for p in addr.split(",")]
+    # Remove internal duplicates (e.g., "300 N GALLERIA DR, 300 N GALLERIA DR")
+    parts = [p.strip() for p in addr.replace('\n', ',').split(",")]
+    unique_parts = []
+    for p in parts:
+        if p and p not in unique_parts: unique_parts.append(p)
     
-    if len(parts) >= 3:
-        street = ", ".join(parts[:-3]) if len(parts) > 3 else parts[0]
-        location = ", ".join(parts[-3:])
+    # Now format for display: Street on one line, City/ST/Zip on next
+    if len(unique_parts) >= 2:
+        street = unique_parts[0]
+        location = ", ".join(unique_parts[1:])
         return f"{street},\n{location}"
-    
-    if "," in addr:
-        parts = addr.rsplit(",", 1)
-        return f"{parts[0].strip()},\n{parts[1].strip()}"
         
-    return addr
+    return ", ".join(unique_parts)
 
 def _build_multi_stop_string(pickups: list, deliveries: list) -> str:
     """Loops through ALL pickups and ALL deliveries for multi-stop loads. 🧠"""
