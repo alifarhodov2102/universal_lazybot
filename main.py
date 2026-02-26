@@ -13,8 +13,8 @@ from database.connection import init_db, AsyncSessionLocal
 from handlers import start, settings, billing, processor, admin
 from utils.middlewares import SubscriptionMiddleware, ThrottlingMiddleware
 
-# Import tracking objects from processor
-from handlers.processor import user_workers, media_group_tracker
+# ✅ FIXED: Import the correct global objects from processor
+from handlers.processor import extraction_queue, media_group_tracker, global_pdf_worker
 
 # 1. Configure logging
 logging.basicConfig(
@@ -38,7 +38,6 @@ async def cleanup_temp_files():
         if os.path.exists(temp_dir):
             for f in os.listdir(temp_dir):
                 f_path = os.path.join(temp_dir, f)
-                # If file is older than 24 hours
                 if os.stat(f_path).st_mtime < now - 86400:
                     try:
                         os.remove(f_path)
@@ -51,16 +50,15 @@ async def on_startup(bot: Bot):
     """Alice performs a self-surgery on the database 🏥💅"""
     logger.info("Waking up Alice's memory... 🧠")
     
-    # Ensure temporary storage exists for PDFs
+    # Ensure temporary storage exists
     if not os.path.exists("temp"):
         os.makedirs("temp")
-        logger.info("📁 Created 'temp' folder for PDF processing.")
+        logger.info("📁 Created 'temp' folder.")
 
     # Initialize basic database tables
     await init_db()
     
     # --- AUTO-MIGRATION LOGIC ---
-    # Automatically handles Railway database synchronization
     async with AsyncSessionLocal() as session:
         try:
             logger.info("Synchronizing database columns... ⚙️")
@@ -80,16 +78,19 @@ async def on_startup(bot: Bot):
     asyncio.create_task(clear_media_tracker_periodic())
     asyncio.create_task(cleanup_temp_files())
     
+    # 🚀 START THE GLOBAL PDF WORKER
+    # This is what actually processes the queue!
+    asyncio.create_task(global_pdf_worker(bot))
+    
     logger.info("Alice is fully awake and ready to judge your PDFs. 💅")
 
 async def main():
-    # 2. Initialize Bot with Default HTML formatting
+    # 2. Initialize Bot
     bot = Bot(
         token=BOT_TOKEN, 
         default=DefaultBotProperties(parse_mode=ParseMode.HTML)
     )
     
-    # MemoryStorage allows Alice to remember user states
     dp = Dispatcher(storage=MemoryStorage())
 
     # 3. Register Startup Hook
@@ -100,7 +101,6 @@ async def main():
     dp.message.middleware(SubscriptionMiddleware())
 
     # 5. Include Routers
-    # Admin first to catch panel interactions, Processor last for the heavy lifting.
     dp.include_router(admin.router) 
     dp.include_router(start.router)
     dp.include_router(settings.router)
@@ -108,16 +108,15 @@ async def main():
     dp.include_router(processor.router)
 
     # 6. Start Polling
-    logger.info("🚀 Lazy Alice: Dispatcher Edition is now ONLINE!")
+    logger.info("🚀 Lazy Alice: Dispatcher Edition is online!")
     
     try:
-        # Clear any pending updates so Alice doesn't get overwhelmed 🥱
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
     except Exception as e:
-        logger.error(f"Ugh, even Alice can't ignore this error: {e}")
+        logger.error(f"Ugh, error: {e}")
     finally:
-        logger.info("Alice is going back to sleep. Don't wake her up. 🥱💤")
+        logger.info("Alice is going back to sleep. 🥱💤")
         await bot.session.close()
 
 if __name__ == "__main__":
