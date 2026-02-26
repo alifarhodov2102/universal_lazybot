@@ -52,6 +52,35 @@ async def extract_template_structure(system_prompt: str, user_example: str) -> s
             logger.error(f"Template Extraction Error: {e}")
             return user_example
 
+async def fetch_coords(addr, client):
+    # We define the protocol and host separately to bypass any hidden formatting ghosts 👻
+    scheme = "https"
+    host = "nominatim.openstreetmap.org"
+    path = "/search"
+    
+    # httpx handles the building of the URL safely
+    url = f"{scheme}://{host}{path}"
+    params = {
+        "q": addr,
+        "format": "json",
+        "limit": 1
+    }
+    
+    try:
+        r = await client.get(
+            url, 
+            params=params, 
+            headers={"User-Agent": "LazyBot_Logistics/2.0"}, 
+            timeout=15
+        )
+        if r.status_code == 200 and r.json():
+            lat = r.json()[0]["lat"]
+            lon = r.json()[0]["lon"]
+            return lat, lon
+    except Exception as e:
+        logger.error(f"❌ Protocol Check Failed for {addr}: {e}")
+    return None
+
 async def get_miles_free(origin: str, destination: str) -> str:
     """Alice calculates distance with triple-fallback logic 🗺️"""
     if not origin or not destination: return "N/A"
@@ -65,22 +94,10 @@ async def get_miles_free(origin: str, destination: str) -> str:
             if p not in unique_parts: unique_parts.append(p)
             
         if level == 1 and len(unique_parts) > 2:
-            return ", ".join(unique_parts[-3:]) # Street, City, State
+            return ", ".join(unique_parts[-3:]) 
         if level == 2 and len(unique_parts) >= 2:
-            return ", ".join(unique_parts[-2:]) # City, State only
+            return ", ".join(unique_parts[-2:]) 
         return ", ".join(unique_parts)
-
-    async def fetch_coords(addr, client):
-        # FIXED: Pure URL with query params for safety
-        url = "[https://nominatim.openstreetmap.org/search](https://nominatim.openstreetmap.org/search)"
-        params = {"q": addr, "format": "json", "limit": 1}
-        try:
-            r = await client.get(url, params=params, headers={"User-Agent": "LazyBot_Logistics/2.0"}, timeout=15)
-            if r.status_code == 200 and r.json():
-                return r.json()[0]["lat"], r.json()[0]["lon"]
-        except Exception as e:
-            logger.error(f"Geocoding error for {addr}: {e}")
-        return None
 
     async with httpx.AsyncClient() as client:
         o_coords = d_coords = None
@@ -91,14 +108,19 @@ async def get_miles_free(origin: str, destination: str) -> str:
 
         if o_coords and d_coords:
             try:
-                # FIXED: Clean OSRM Protocol string
-                osrm_url = f"[http://router.project-osrm.org/route/v1/driving/](http://router.project-osrm.org/route/v1/driving/){o_coords[1]},{o_coords[0]};{d_coords[1]},{d_coords[0]}?overview=false"
+                # Use standard string for OSRM to ensure no hidden characters
+                osrm_scheme = "http"
+                osrm_host = "router.project-osrm.org"
+                osrm_path = f"/route/v1/driving/{o_coords[1]},{o_coords[0]};{d_coords[1]},{d_coords[0]}"
+                
+                osrm_url = f"{osrm_scheme}://{osrm_host}{osrm_path}?overview=false"
+                
                 res = await client.get(osrm_url, timeout=10)
                 if res.status_code == 200:
                     meters = res.json()["routes"][0]["distance"]
                     return str(round(meters * 0.000621371, 1))
             except Exception as e:
-                logger.error(f"OSRM Route Error: {e}")
+                logger.error(f"❌ OSRM Route Error: {e}")
                 
     return "N/A"
 
