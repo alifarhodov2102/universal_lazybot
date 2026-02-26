@@ -27,9 +27,9 @@ user_workers: dict[int, asyncio.Task] = {}
 media_group_tracker: dict[str, int] = {} 
 
 async def check_and_update_limit(uid: int) -> tuple[bool, int, str]:
-    """Alice checks status and fetches the template while the DB session is active. 💅"""
+    """Alice checks the user's soul and returns (IsAllowed, LeftCount, TemplateText) 💅"""
     async with AsyncSessionLocal() as session:
-        # Force fresh data to ensure Pro status is recognized immediately
+        # Force fresh data to see the LATEST Pro status immediately
         session.expire_all()
         
         stmt = select(User).where(User.tg_id == uid)
@@ -39,23 +39,25 @@ async def check_and_update_limit(uid: int) -> tuple[bool, int, str]:
         if not user:
             return False, 0, None
             
+        # 1. Status Logic
         is_admin = uid in ADMIN_IDS
         current_time = datetime.utcnow()
         
-        # Determine if Pro is active
+        # Determine if Pro is actually active
         is_pro_active = False
         if user.is_pro:
             if user.expiry_date is None or user.expiry_date > current_time:
                 is_pro_active = True
         
-        user_template = user.template_text # Capture template here to avoid DB calls in worker
+        # We fetch the template NOW while the session is open
+        user_template = user.template_text
         
         logger.info(f"User {uid} check: Admin={is_admin}, Pro={is_pro_active}, Used={user.daily_requests}")
 
         if is_admin or is_pro_active:
             return True, 999, user_template
 
-        # Free User Logic
+        # 2. Free User Logic
         today = date.today()
         if user.last_request_date < today:
             user.daily_requests = 0
@@ -68,10 +70,11 @@ async def check_and_update_limit(uid: int) -> tuple[bool, int, str]:
             
         user.daily_requests += 1
         await session.commit()
+        
         return True, (10 - user.daily_requests), user_template
 
 async def safe_edit_status(bot: Bot, chat_id: int, message_id: int, new_text: str):
-    """Alice safely updates her status without crashing. 💅"""
+    """Alice speaks carefully to avoid crashing. 💅"""
     try:
         return await bot.edit_message_text(
             text=new_text,
@@ -87,7 +90,7 @@ async def safe_edit_status(bot: Bot, chat_id: int, message_id: int, new_text: st
     return None
 
 async def process_user_queue(uid: int, bot: Bot, template: str):
-    """Worker logic: Processes the user's personal queue. Template is pre-passed. ☕"""
+    """Worker logic: Processes the user's personal queue. Template is passed in safely. ☕"""
     q = user_queues.get(uid)
     if not q: return
 
@@ -122,7 +125,7 @@ async def process_user_queue(uid: int, bot: Bot, template: str):
                 
                 data = await ai_task
                 
-                # Render using the template fetched before the long AI wait
+                # Render using the template we grabbed at the start of the handle_pdf
                 formatted_output = render_result(data, template)
                 
                 await bot.send_message(
@@ -150,14 +153,14 @@ async def handle_pdf(message: types.Message, bot: Bot):
     uid = message.from_user.id
     mg_id = message.media_group_id
 
-    # 1. Check Limits and Fetch Template immediately
+    # 1. Fetch ALL data from DB at once (Permissions + Template)
     allowed, left, template = await check_and_update_limit(uid)
     if not allowed:
         return await message.answer(
             "💸 <b>Daily Limit Reached!</b>\n\nUpgrade to /plans now. 💅"
         )
 
-    # 2. Media Group Limit (Max 5 PDFs)
+    # 2. Batch Limit (Max 5 PDFs)
     if mg_id:
         if mg_id not in media_group_tracker:
             media_group_tracker[mg_id] = 0
@@ -188,12 +191,13 @@ async def handle_pdf(message: types.Message, bot: Bot):
         "reply_to_id": message.message_id 
     })
 
-    # 4. Start Worker with the pre-fetched template
+    # 4. Start Worker (Passing the template directly to avoid DB connection errors)
     if uid not in user_workers or user_workers[uid].done():
         user_workers[uid] = asyncio.create_task(process_user_queue(uid, bot, template))
 
 @router.message(Command("check_user"))
 async def admin_check_user(message: types.Message):
+    """Admin command to check user status 🧐"""
     if message.from_user.id not in ADMIN_IDS: return
     args = message.text.split()
     if len(args) < 2: return await message.answer("Usage: <code>/check_user [tg_id]</code>")
@@ -220,5 +224,5 @@ async def admin_check_user(message: types.Message):
 @router.message(F.text & ~F.text.startswith("/"))
 async def sassy_chat(message: types.Message, state: FSMContext):
     if await state.get_state() is not None: return
-    responses = ["🙄 Send a PDF.", "💅 Only PDFs.", "🥱 Send the RC."]
+    responses = ["🙄 Send a PDF.", "💅 Only PDFs.", "🥱 Send the RC.", "🚫 Move along, honey."]
     await message.reply(random.choice(responses), parse_mode=ParseMode.HTML)
