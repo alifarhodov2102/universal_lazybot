@@ -53,12 +53,11 @@ async def extract_template_structure(system_prompt: str, user_example: str) -> s
             return user_example
 
 async def fetch_coords(addr, client):
-    # We define the protocol and host separately to bypass any hidden formatting ghosts 👻
+    """Cleanly constructed URL to avoid hidden formatting issues 👻"""
     scheme = "https"
     host = "nominatim.openstreetmap.org"
     path = "/search"
     
-    # httpx handles the building of the URL safely
     url = f"{scheme}://{host}{path}"
     params = {
         "q": addr,
@@ -78,7 +77,7 @@ async def fetch_coords(addr, client):
             lon = r.json()[0]["lon"]
             return lat, lon
     except Exception as e:
-        logger.error(f"❌ Protocol Check Failed for {addr}: {e}")
+        logger.error(f"❌ Geocoding Failed for {addr}: {e}")
     return None
 
 async def get_miles_free(origin: str, destination: str) -> str:
@@ -108,11 +107,9 @@ async def get_miles_free(origin: str, destination: str) -> str:
 
         if o_coords and d_coords:
             try:
-                # Use standard string for OSRM to ensure no hidden characters
                 osrm_scheme = "http"
                 osrm_host = "router.project-osrm.org"
                 osrm_path = f"/route/v1/driving/{o_coords[1]},{o_coords[0]};{d_coords[1]},{d_coords[0]}"
-                
                 osrm_url = f"{osrm_scheme}://{osrm_host}{osrm_path}?overview=false"
                 
                 res = await client.get(osrm_url, timeout=10)
@@ -131,8 +128,8 @@ async def deepseek_ai_extract(text: str) -> dict:
     prompt = f"""
 Analyze this US Logistics Rate Confirmation. RETURN ONLY VALID JSON.
 CRITICAL GUIDELINES:
-1. BROKER: Identify the actual COMPANY NAME. Ignore names like 'Adrian Santos'.
-2. ALL STOPS: Capture EVERY pickup (PU) and EVERY delivery (SO/Stop) in the document. Do not skip stops.
+1. BROKER: Identify the actual COMPANY NAME.
+2. ALL STOPS: Capture EVERY pickup (PU) and EVERY delivery (SO/Stop).
 3. ADRESSES: Extract the full address (Street, City, ST, Zip).
 4. LOAD ID: Use the 'Load Number' or 'PRO #'.
 
@@ -157,7 +154,7 @@ TEXT:
                 json={
                     "model": "deepseek-chat",
                     "messages": [
-                        {"role": "system", "content": "You are a US Logistics Specialist. You capture every single stop on a multi-stop load confirmation without exception."},
+                        {"role": "system", "content": "You are a US Logistics Specialist. You capture every single stop."},
                         {"role": "user", "content": prompt}
                     ],
                     "temperature": 0
@@ -179,7 +176,6 @@ async def smart_extract(text: str) -> dict:
     if not data:
         data = {"broker": "N/A", "load_number": "", "rate": "", "total_miles": "N/A"}
 
-    # 1. Regex Overlays (Safety fallback for IDs and Rates)
     if load_match := LOAD_RE.search(text):
         if not data.get("load_number") or data["load_number"] == "ID":
             data["load_number"] = load_match.group(1)
@@ -188,7 +184,7 @@ async def smart_extract(text: str) -> dict:
         if not data.get("rate") or data["rate"] == "0.00":
             data["rate"] = rate_match.group(1)
 
-    # 2. Cumulative Mileage Logic: PU1 -> DEL1 -> DEL2
+    # Cumulative Mileage Logic: PU1 -> DEL1 -> DEL2
     if not data.get("total_miles") or str(data["total_miles"]) in ["", "N/A", "0"]:
         if data.get("pickups") and data.get("deliveries"):
             all_stops = data["pickups"] + data["deliveries"]
@@ -202,7 +198,6 @@ async def smart_extract(text: str) -> dict:
                 seg_dest = all_stops[i+1]["address"]
                 
                 logger.info(f"🛣️ Leg {i+1}: Calculating {seg_origin} TO {seg_dest}")
-                
                 seg_miles = await get_miles_free(seg_origin, seg_dest)
                 
                 if seg_miles != "N/A":
