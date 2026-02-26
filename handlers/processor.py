@@ -43,12 +43,21 @@ async def check_and_update_limit(uid: int) -> tuple[bool, int]:
         is_admin = uid in ADMIN_IDS
 
         # 🔥 timezone-safe current time
-        current_time = datetime.now(timezone.utc)
+        current_time = datetime.utcnow()  # keep naive to match DB
 
         is_pro_active = False
         if user.is_pro:
-            if user.expiry_date is None or user.expiry_date > current_time:
+            if user.expiry_date is None:
                 is_pro_active = True
+            else:
+                expiry = user.expiry_date
+
+        # 🔥 normalize if DB accidentally returns aware
+        if expiry.tzinfo is not None:
+            expiry = expiry.replace(tzinfo=None)
+
+        if expiry > current_time:
+            is_pro_active = True
 
         logger.info(
             f"User {uid} check: Admin={is_admin}, "
