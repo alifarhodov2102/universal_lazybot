@@ -26,11 +26,14 @@ user_queues: dict[int, asyncio.Queue] = {}
 user_workers: dict[int, asyncio.Task] = {}
 media_group_tracker: dict[str, int] = {} 
 
-async def check_and_update_limit(uid: int) -> tuple[bool, int, str]:
-    """Alice checks the user's soul and returns (IsAllowed, LeftCount, TemplateText) 💅"""
+async def get_user_permissions(uid: int) -> tuple[bool, int, str]:
+    """
+    One-stop shop for user data. 
+    Fetches Pro status, resets limits if it's a new day, and gets the template.
+    """
     async with AsyncSessionLocal() as session:
-        # 🟢 CRITICAL: Force a COMMIT to clear the transaction cache
-        # This fixes the issue where the bot doesn't see Pro updates from other sessions.
+        # 🟢 CRITICAL: Force a COMMIT to clear session cache 
+        # This ensures we see 'is_pro' updates made by other processes
         await session.execute(text("COMMIT"))
         
         stmt = select(User).where(User.tg_id == uid)
@@ -39,26 +42,20 @@ async def check_and_update_limit(uid: int) -> tuple[bool, int, str]:
         
         if not user:
             return False, 0, ""
-            
-        # 1. Status Logic
+
+        # 1. Admin/Pro Logic
         is_admin = uid in ADMIN_IDS
-        current_time = datetime.utcnow()
+        is_pro = user.is_pro and (user.expiry_date is None or user.expiry_date > datetime.utcnow())
         
-        # Determine if Pro is actually active
-        is_pro_active = False
-        if user.is_pro:
-            if user.expiry_date is None or user.expiry_date > current_time:
-                is_pro_active = True
+        # Pre-capture template as a safe string
+        template = str(user.template_text or "")
         
-        # Pre-capture template as a string to avoid lazy-loading issues
-        user_template = str(user.template_text or "")
-        
-        logger.info(f"🔍 [DB CHECK] UID: {uid} | Pro: {is_pro_active} | Admin: {is_admin}")
+        logger.info(f"🔍 [DB CHECK] UID: {uid} | Pro: {is_pro} | Admin: {is_admin}")
 
-        if is_admin or is_pro_active:
-            return True, 999, user_template
+        if is_admin or is_pro:
+            return True, 999, template
 
-        # 2. Free User Logic
+        # 2. Free Daily Limit Logic
         today = date.today()
         if user.last_request_date < today:
             user.daily_requests = 0
@@ -66,17 +63,16 @@ async def check_and_update_limit(uid: int) -> tuple[bool, int, str]:
             await session.commit()
         
         if user.daily_requests >= 10:
-            return False, 0, user_template
+            return False, 0, template
             
         user.daily_requests += 1
         await session.commit()
-        
-        return True, (10 - user.daily_requests), user_template
+        return True, (10 - user.daily_requests), template
 
 async def safe_edit_status(bot: Bot, chat_id: int, message_id: int, new_text: str):
-    """Alice speaks carefully to avoid crashing. 💅"""
+    """Updates status without crashing on Telegram API hiccups. 💅"""
     try:
-        return await bot.edit_message_text(
+        await bot.edit_message_text(
             text=new_text,
             chat_id=chat_id,
             message_id=message_id,
@@ -84,10 +80,12 @@ async def safe_edit_status(bot: Bot, chat_id: int, message_id: int, new_text: st
         )
     except Exception:
         pass
-    return None
 
 async def process_user_queue(uid: int, bot: Bot, template: str):
-    """Worker logic: Processes the user's personal queue. Template is passed in safely. ☕"""
+    """
+    The Worker: Independent of the Database.
+    Processes PDFs one by one for a specific user.
+    """
     q = user_queues.get(uid)
     if not q: return
 
@@ -96,12 +94,12 @@ async def process_user_queue(uid: int, bot: Bot, template: str):
             item = await q.get()
             chat_id = item["chat_id"]
             file_id = item["file_id"]
-            status_msg_id = item["status_msg_id"]
-            reply_to_id = item["reply_to_id"]
+            status_id = item["status_msg_id"]
+            reply_id = item["reply_to_id"]
             
             tmp_path = None
             try:
-                await safe_edit_status(bot, chat_id, status_msg_id, "📄 <b>Downloading...</b> [15%]")
+                await safe_edit_status(bot, chat_id, status_id, "📄 <b>Downloading...</b> [15%]")
                 file = await bot.get_file(file_id)
                 raw = await bot.download_file(file.file_path)
 
@@ -109,28 +107,28 @@ async def process_user_queue(uid: int, bot: Bot, template: str):
                     tmp.write(raw.read())
                     tmp_path = tmp.name
 
-                await safe_edit_status(bot, chat_id, status_msg_id, "🔍 <b>Reading PDF...</b> [45%]")
+                await safe_edit_status(bot, chat_id, status_id, "🔍 <b>Reading PDF...</b> [45%]")
                 text = await extract_text_async(tmp_path)
                 
-                # DeepSeek AI Logic
+                # AI Logic (DeepSeek/OCR)
                 data = await smart_extract(text)
                 
-                # Render using the template we grabbed at the start
+                # Render using the template we grabbed before the worker started
                 formatted_output = render_result(data, template)
                 
                 await bot.send_message(
                     chat_id, 
                     formatted_output, 
-                    reply_to_message_id=reply_to_id,
+                    reply_to_message_id=reply_id,
                     parse_mode=ParseMode.HTML
                 )
 
             except Exception as e:
                 logger.error(f"❌ Worker Error for {uid}: {e}")
-                await bot.send_message(chat_id, f"🙄 <b>Error:</b> <code>{e}</code>", reply_to_message_id=reply_to_id)
+                await bot.send_message(chat_id, f"🙄 <b>Error:</b> <code>{e}</code>", reply_to_message_id=reply_id)
             
             finally:
-                try: await bot.delete_message(chat_id, status_msg_id)
+                try: await bot.delete_message(chat_id, status_id)
                 except: pass
                 if tmp_path and os.path.exists(tmp_path): 
                     os.remove(tmp_path)
@@ -143,14 +141,14 @@ async def handle_pdf(message: types.Message, bot: Bot):
     uid = message.from_user.id
     mg_id = message.media_group_id
 
-    # 1. Fetch permissions and template
-    allowed, left, template = await check_and_update_limit(uid)
+    # 1. Fetch EVERYTHING from the DB immediately 🏃‍♂️
+    allowed, left, template = await get_user_permissions(uid)
     if not allowed:
         return await message.answer(
             "💸 <b>Daily Limit Reached!</b>\n\nUpgrade to /plans now. 💅"
         )
 
-    # 2. Batch Limit (Max 5 PDFs)
+    # 2. Batch Limit (Max 5 PDFs in one go)
     if mg_id:
         if mg_id not in media_group_tracker:
             media_group_tracker[mg_id] = 0
@@ -158,10 +156,10 @@ async def handle_pdf(message: types.Message, bot: Bot):
         
         if media_group_tracker[mg_id] > 5:
             if media_group_tracker[mg_id] == 6:
-                await message.reply("💅 <b>Honey, stop!</b> My limit is 5 PDFs. Ignoring the rest.")
+                await message.reply("💅 <b>Honey, stop!</b> My limit is 5 PDFs per batch.")
             return
 
-    # 3. Queue Notification
+    # 3. Queue Logic
     if uid not in user_queues:
         user_queues[uid] = asyncio.Queue()
     
@@ -181,7 +179,7 @@ async def handle_pdf(message: types.Message, bot: Bot):
         "reply_to_id": message.message_id 
     })
 
-    # 4. Start Worker
+    # 4. Start Worker (Pass the template into the worker so it doesn't need the DB)
     if uid not in user_workers or user_workers[uid].done():
         user_workers[uid] = asyncio.create_task(process_user_queue(uid, bot, template))
 
@@ -208,10 +206,11 @@ async def admin_check_user(message: types.Message):
             f"📈 <b>Used:</b> {user.daily_requests}/10"
         )
         await message.answer(info)
-    except: await message.answer("Invalid ID.")
+    except Exception:
+        await message.answer("Invalid ID format.")
 
 @router.message(F.text & ~F.text.startswith("/"))
 async def sassy_chat(message: types.Message, state: FSMContext):
     if await state.get_state() is not None: return
     responses = ["🙄 Send a PDF.", "💅 Only PDFs.", "🥱 Send the RC.", "🚫 Move along, honey."]
-    await message.reply(random.choice(responses), parse_mode=ParseMode.HTML)
+    await message.reply(random.choice(responses))
