@@ -77,10 +77,10 @@ async def get_user_context(uid: int) -> tuple[bool, int, str]:
 
 # ================= GLOBAL WORKER =================
 async def global_pdf_worker(bot: Bot):
-    """The core engine. Processes the global queue one by one. ☕💅"""
+    """The heart of Alice. Processes the global queue one by one. ☕💅"""
     logger.info("⚙️ Global PDF Worker is now ONLINE.")
     while True:
-        # Wait for next PDF in line
+        # Ждем задачу из очереди
         item = await extraction_queue.get()
         
         uid = item["uid"]
@@ -92,8 +92,15 @@ async def global_pdf_worker(bot: Bot):
         
         tmp_path = None
         try:
-            # 1. Download
-            await bot.edit_message_text("📄 <b>Downloading...</b> [15%]", chat_id, status_id)
+            logger.info(f"🚀 Processing file for {uid}...")
+            
+            # ✅ ИСПРАВЛЕНО: Используем именованные аргументы
+            await bot.edit_message_text(
+                text="📄 <b>Downloading...</b> [15%]", 
+                chat_id=chat_id, 
+                message_id=status_id
+            )
+            
             file = await bot.get_file(file_id)
             raw = await bot.download_file(file.file_path)
 
@@ -101,37 +108,61 @@ async def global_pdf_worker(bot: Bot):
                 tmp.write(raw.read())
                 tmp_path = tmp.name
 
-            # 2. OCR Extraction
-            await bot.edit_message_text("🔍 <b>Reading PDF...</b> [45%]", chat_id, status_id)
+            await bot.edit_message_text(
+                text="🔍 <b>Reading PDF...</b> [45%]", 
+                chat_id=chat_id, 
+                message_id=status_id
+            )
+            
             text = await extract_text_async(tmp_path)
             
-            # 3. AI Smart Extract
+            # AI Processing
             ai_task = asyncio.create_task(smart_extract(text))
             percent = 50
             while not ai_task.done():
                 if percent < 95:
                     percent += 5
                     try:
-                        await bot.edit_message_text(f"🧠 <b>Thinking...</b> [{percent}%]", chat_id, status_id)
-                    except: pass
+                        await bot.edit_message_text(
+                            text=f"🧠 <b>Thinking...</b> [{percent}%]", 
+                            chat_id=chat_id, 
+                            message_id=status_id
+                        )
+                    except: 
+                        pass
                 await asyncio.sleep(1.5)
             
             data = await ai_task
             
-            # 4. Final Render
+            # Rendering
             formatted_output = render_result(data, template)
-            await bot.send_message(chat_id, formatted_output, reply_to_message_id=reply_id)
+            
+            # Отправляем финальный результат
+            await bot.send_message(
+                chat_id=chat_id, 
+                text=formatted_output, 
+                reply_to_message_id=reply_id
+            )
+            logger.info(f"✅ Successfully processed file for {uid}")
 
         except Exception as e:
             logger.error(f"❌ Worker error for {uid}: {e}")
             try:
-                await bot.send_message(chat_id, f"🙄 <b>Error:</b> <code>{e}</code>", reply_to_message_id=reply_id)
-            except: pass
+                await bot.send_message(
+                    chat_id=chat_id, 
+                    text=f"🙄 <b>Error:</b> <code>{e}</code>", 
+                    reply_to_message_id=reply_id
+                )
+            except: 
+                pass
         finally:
             # Cleanup
-            try: await bot.delete_message(chat_id, status_id)
-            except: pass
-            if tmp_path and os.path.exists(tmp_path): os.remove(tmp_path)
+            try: 
+                await bot.delete_message(chat_id=chat_id, message_id=status_id)
+            except: 
+                pass
+            if tmp_path and os.path.exists(tmp_path): 
+                os.remove(tmp_path)
             extraction_queue.task_done()
 
 # ================= HANDLERS =================
