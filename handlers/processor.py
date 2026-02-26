@@ -3,7 +3,7 @@ import tempfile
 import asyncio
 import random
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from aiogram import Router, types, F, Bot
 from sqlalchemy import select
 from aiogram.exceptions import TelegramBadRequest
@@ -21,18 +21,19 @@ from config import ADMIN_IDS
 logger = logging.getLogger("LazyAlice.Processor")
 router = Router()
 
-# Global trackers for queue management
+# ================= GLOBALS =================
 user_queues: dict[int, asyncio.Queue] = {}
 user_workers: dict[int, asyncio.Task] = {}
 media_group_tracker: dict[str, int] = {}
 
+MEDIA_GROUP_LIMIT = 5
+FREE_DAILY_LIMIT = 10
+
 
 # ================= LIMIT CHECK =================
 async def check_and_update_limit(uid: int) -> tuple[bool, int]:
-    """Alice performs a deep check of the user's status. 💅"""
+    """Deep user check with safe expiry handling. 💅"""
     async with AsyncSessionLocal() as session:
-        session.expire_all()
-
         stmt = select(User).where(User.tg_id == uid)
         res = await session.execute(stmt)
         user = res.scalar_one_or_none()
@@ -41,49 +42,49 @@ async def check_and_update_limit(uid: int) -> tuple[bool, int]:
             return False, 0
 
         is_admin = uid in ADMIN_IDS
+        now = datetime.utcnow()
 
-        # 🔥 timezone-safe current time
-        current_time = datetime.utcnow()  # keep naive to match DB
+        # ✅ FIXED: always define expiry safely
+        expiry = user.expiry_date if user.is_pro else None
 
         is_pro_active = False
+
         if user.is_pro:
-            if user.expiry_date is None:
+            if expiry is None:
                 is_pro_active = True
             else:
-                expiry = user.expiry_date
+                # normalize tz
+                if expiry.tzinfo is not None:
+                    expiry = expiry.replace(tzinfo=None)
 
-        # 🔥 normalize if DB accidentally returns aware
-        if expiry.tzinfo is not None:
-            expiry = expiry.replace(tzinfo=None)
-
-        if expiry > current_time:
-            is_pro_active = True
+                if expiry > now:
+                    is_pro_active = True
 
         logger.info(
             f"User {uid} check: Admin={is_admin}, "
             f"Pro={is_pro_active}, Used={user.daily_requests}"
         )
 
-        # ✅ Unlimited for admin/pro
+        # ✅ Unlimited users
         if is_admin or is_pro_active:
             return True, 999
 
         # ===== Free user logic =====
         today = date.today()
 
-        if user.last_request_date < today:
+        if user.last_request_date != today:
             user.daily_requests = 0
             user.last_request_date = today
             await session.commit()
             await session.refresh(user)
 
-        if user.daily_requests >= 10:
+        if user.daily_requests >= FREE_DAILY_LIMIT:
             return False, 0
 
         user.daily_requests += 1
         await session.commit()
 
-        return True, (10 - user.daily_requests)
+        return True, (FREE_DAILY_LIMIT - user.daily_requests)
 
 
 # ================= SAFE EDIT =================
@@ -98,14 +99,14 @@ async def safe_edit_status(bot: Bot, chat_id: int, message_id: int, new_text: st
     except TelegramBadRequest as e:
         if "message is not modified" in str(e).lower():
             return None
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"safe_edit_status failed: {e}")
     return None
 
 
-# ================= WORKER (FIXED) =================
+# ================= WORKER =================
 async def process_user_queue(uid: int, bot: Bot):
-    """Worker logic: Processes the user's personal queue safely. ☕"""
+    """Processes personal queue safely. ☕"""
     q = user_queues.get(uid)
     if not q:
         return
@@ -115,11 +116,13 @@ async def process_user_queue(uid: int, bot: Bot):
     try:
         while True:
             try:
-                # 🔥 KEY FIX: wait for items instead of checking empty()
-                item = await asyncio.wait_for(q.get(), timeout=5)
+                item = await asyncio.wait_for(q.get(), timeout=10)
             except asyncio.TimeoutError:
-                logger.info(f"🛑 Worker idle timeout for user {uid}")
-                break
+                # ✅ only stop if still empty
+                if q.empty():
+                    logger.info(f"🛑 Worker idle timeout for user {uid}")
+                    break
+                continue
 
             chat_id = item["chat_id"]
             file_id = item["file_id"]
@@ -180,7 +183,7 @@ async def process_user_queue(uid: int, bot: Bot):
                 )
 
             except Exception as e:
-                logger.error(f"Worker Error for {uid}: {e}")
+                logger.exception(f"Worker Error for {uid}")
                 await bot.send_message(
                     chat_id,
                     f"🙄 <b>Error:</b>\n<code>{str(e)}</code>",
@@ -216,22 +219,23 @@ async def handle_pdf(message: types.Message, bot: Bot):
             "💸 <b>Daily Limit Reached!</b>\n\nUpgrade to /plans now. 💅"
         )
 
-    # 2. Media group limit
+    # 2. Media group limit + auto cleanup
     if mg_id:
-        if mg_id not in media_group_tracker:
-            media_group_tracker[mg_id] = 0
+        media_group_tracker.setdefault(mg_id, 0)
         media_group_tracker[mg_id] += 1
 
-        if media_group_tracker[mg_id] > 5:
-            if media_group_tracker[mg_id] == 6:
+        if media_group_tracker[mg_id] > MEDIA_GROUP_LIMIT:
+            if media_group_tracker[mg_id] == MEDIA_GROUP_LIMIT + 1:
                 await message.reply(
                     "💅 <b>Honey, stop!</b> My limit is 5 PDFs. Ignoring the rest."
                 )
             return
 
+        # cleanup after some time
+        asyncio.create_task(_cleanup_media_group(mg_id))
+
     # 3. Ensure queue exists
-    if uid not in user_queues:
-        user_queues[uid] = asyncio.Queue()
+    user_queues.setdefault(uid, asyncio.Queue())
 
     left_text = "Unlimited" if left == 999 else f"{left} left today"
     q_pos = user_queues[uid].qsize()
@@ -254,6 +258,11 @@ async def handle_pdf(message: types.Message, bot: Bot):
     # 4. Start worker if needed
     if uid not in user_workers or user_workers[uid].done():
         user_workers[uid] = asyncio.create_task(process_user_queue(uid, bot))
+
+
+async def _cleanup_media_group(mg_id: str):
+    await asyncio.sleep(120)
+    media_group_tracker.pop(mg_id, None)
 
 
 # ================= ADMIN =================
@@ -283,7 +292,7 @@ async def admin_check_user(message: types.Message):
             f"👤 <b>User:</b> <code>{target_id}</code>\n"
             f"📊 <b>Status:</b> {status}\n"
             f"📅 <b>Expiry:</b> {user.expiry_date if user.expiry_date else 'N/A'}\n"
-            f"📈 <b>Used:</b> {user.daily_requests}/10"
+            f"📈 <b>Used:</b> {user.daily_requests}/{FREE_DAILY_LIMIT}"
         )
 
         await message.answer(info)
