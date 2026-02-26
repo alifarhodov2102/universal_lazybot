@@ -13,13 +13,21 @@ logger = logging.getLogger("Extractor")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
 
-# 1. High-Performance Regex Patterns (Numeric/Rate fallback only)
+# 1. High-Performance Regex Patterns
 LOAD_RE = re.compile(r"(?:Load\s*Number|PRO\s*#|Load\s*#|Order\s*#|Reference\s*#)[:\s]*([0-9A-Z-]{5,15})", re.I)
 RATE_RE = re.compile(r"(?:Total\s*Rate|Total\s*Pay|Base\s*Rate|Rate)[:\s]*\$?\s*([\d,]+\.\d{2})", re.I)
 MILES_RE = re.compile(r"(?:Total\s*Miles|Distance|Miles)[:\s]*([\d.,]+)", re.I)
 
 async def extract_template_structure(system_prompt: str, user_example: str) -> str:
-    """Alice turns a real load message into a clean skeleton/template 🧠💅"""
+    """Alice turns a real load message into a clean skeleton 🧠💅"""
+    # CRITICAL: We instruct the AI to consolidate all stops into one tag
+    enhanced_prompt = system_prompt + """
+    CRITICAL INSTRUCTION: If the example contains multiple stops (PU1, DEL1, DEL2, etc.), 
+    replace that entire section with a single {{ stops_info }} tag. 
+    Do not keep manual labels like '1#: PICK UP' if they are part of the stops list.
+    Ensure the resulting skeleton is clean and scannable.
+    """
+    
     if not DEEPSEEK_API_KEY:
         logger.error("DEEPSEEK_API_KEY missing!")
         return user_example
@@ -32,7 +40,7 @@ async def extract_template_structure(system_prompt: str, user_example: str) -> s
                 json={
                     "model": "deepseek-chat",
                     "messages": [
-                        {"role": "system", "content": system_prompt},
+                        {"role": "system", "content": enhanced_prompt},
                         {"role": "user", "content": user_example}
                     ],
                     "temperature": 0.1
@@ -50,13 +58,16 @@ async def get_miles_free(origin: str, destination: str) -> str:
     """Alice calculates distance by stripping facility noise for OSRM 🗺️"""
     if not origin or not destination: return ""
     
-    clean_regex = r'^(?:FMC|JASPER|ARMSTRONG|PLANT \d+|DC|RESUPPLY|FPDC|WAREHOUSE|LOGISTICS|POLAND SPRING)\s+'
+    # Refined cleaning: Remove common facility noise but keep the address/city intact
+    # This prevents Poland Spring, ME from being completely stripped
+    clean_regex = r'^(?:FMC|JASPER|ARMSTRONG|PLANT \d+|DC|RESUPPLY|FPDC|WAREHOUSE|LOGISTICS|NAME:)\s+'
     o_addr = re.sub(clean_regex, '', origin, flags=re.I).strip()
     d_addr = re.sub(clean_regex, '', destination, flags=re.I).strip()
 
     try:
         async with httpx.AsyncClient() as client:
             async def get_coords(addr):
+                # We use a proper URL to avoid bracket noise
                 url = f"[https://nominatim.openstreetmap.org/search?q=](https://nominatim.openstreetmap.org/search?q=){addr}&format=json&limit=1"
                 r = await client.get(url, headers={"User-Agent": "LazyBot_Logistics/2.0"}, timeout=15)
                 if r.status_code == 200 and r.json():
@@ -71,6 +82,7 @@ async def get_miles_free(origin: str, destination: str) -> str:
                 res = await client.get(osrm_url, timeout=10)
                 if res.status_code == 200:
                     meters = res.json()["routes"][0]["distance"]
+                    # Convert meters to miles
                     return str(round(meters * 0.000621371, 1))
     except Exception as e:
         logger.error(f"OSRM Error: {e}")
@@ -83,10 +95,10 @@ async def deepseek_ai_extract(text: str) -> dict:
     prompt = f"""
 Analyze this US Logistics Rate Confirmation. RETURN ONLY VALID JSON.
 CRITICAL GUIDELINES:
-1. BROKER: Identify the actual COMPANY NAME (e.g., WORLDWIDE EXPRESS, GLOBALTRANZ). Ignore names like 'Adrian Santos'.
-2. ALL STOPS: Extract EVERY pickup (PU) and EVERY delivery (SO/Drop). Do not skip stops.
-3. ADRESSES: Capture the full address including City, State, and Zip.
-4. LOAD ID: Look for 'Load Number'.
+1. BROKER: Identify the actual COMPANY NAME (e.g., WORLDWIDE EXPRESS, GLOBALTRANZ). Ignore individual names like 'Adrian Santos'.
+2. ALL STOPS: Capture EVERY pickup (PU) and EVERY delivery (SO/Stop) in the document. Do not skip any destinations.
+3. ADRESSES: Extract the full address (Street, City, ST, Zip).
+4. LOAD ID: Use the 'Load Number' or 'PRO #'.
 
 Return JSON:
 {{
@@ -109,7 +121,7 @@ TEXT:
                 json={
                     "model": "deepseek-chat",
                     "messages": [
-                        {"role": "system", "content": "You are a US Logistics Specialist. You capture every stop on a multi-stop load confirmation."},
+                        {"role": "system", "content": "You are a US Logistics Specialist. You capture every single stop on a multi-stop load confirmation without exception."},
                         {"role": "user", "content": prompt}
                     ],
                     "temperature": 0
@@ -124,15 +136,15 @@ TEXT:
             return None
 
 async def smart_extract(text: str) -> dict:
-    logger.info("Starting AI-Driven Extraction Pipeline... 💅")
+    logger.info("Starting Multi-Stop Extraction Pipeline... 💅")
     
-    # 1. AI Primary Extraction (Crucial for Broker and ALL addresses)
+    # 1. AI Primary Extraction (Captured Broker and all Stops)
     data = await deepseek_ai_extract(text)
     
     if not data:
         data = {"broker": "N/A", "load_number": "", "rate": "", "total_miles": ""}
 
-    # 2. Regex Secondary Check (IDs and Rates)
+    # 2. Regex Check for IDs and Rates (Safety fallback)
     if load_match := LOAD_RE.search(text):
         if not data.get("load_number") or data["load_number"] == "ID":
             data["load_number"] = load_match.group(1)
@@ -145,12 +157,12 @@ async def smart_extract(text: str) -> dict:
         if not data.get("total_miles") or data["total_miles"] == "0":
             data["total_miles"] = miles_match.group(1)
             
-    # 3. Multi-Stop Mileage Calculation
-    # Logic: Calculate distance from the first PU to the very LAST delivery
+    # 3. Multi-Stop Distance Check
+    # We calculate distance from the first pickup to the absolute LAST delivery in the list
     if not data.get("total_miles") or str(data["total_miles"]) in ["", "N/A", "0"]:
         if data.get("pickups") and data.get("deliveries"):
             origin = data["pickups"][0]["address"]
-            destination = data["deliveries"][-1]["address"] # -1 gets the final stop
+            destination = data["deliveries"][-1]["address"] 
             miles = await get_miles_free(origin, destination)
             data["total_miles"] = miles
             
