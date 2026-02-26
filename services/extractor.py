@@ -23,13 +23,9 @@ async def extract_template_structure(system_prompt: str, user_example: str) -> s
     enhanced_prompt = system_prompt + """
     CRITICAL INSTRUCTION: If the example contains multiple stops (PU1, DEL1, DEL2, etc.), 
     replace that entire section with a single {{ stops_info }} tag. 
-    Do not keep manual labels like '1#: PICK UP' if they are part of the stops list.
     Ensure the resulting skeleton is clean and scannable.
     """
-    
-    if not DEEPSEEK_API_KEY:
-        logger.error("DEEPSEEK_API_KEY missing!")
-        return user_example
+    if not DEEPSEEK_API_KEY: return user_example
 
     async with httpx.AsyncClient() as client:
         try:
@@ -58,21 +54,17 @@ async def get_miles_free(origin: str, destination: str) -> str:
     if not origin or not destination: return "N/A"
     
     def clean_addr(addr, level=0):
-        # Strip common facility noise and duplicate lines
         addr = re.sub(r'^(?:FMC|JASPER|ARMSTRONG|PLANT \d+|DC|RESUPPLY|FPDC|WAREHOUSE|LOGISTICS|NAME:|ADDRESS:)\s+', '', addr, flags=re.I)
         parts = [p.strip() for p in addr.replace('\n', ',').split(",") if p.strip()]
         unique_parts = []
         for p in parts:
             if p not in unique_parts: unique_parts.append(p)
-            
-        if level == 1 and len(unique_parts) > 2:
-            return ", ".join(unique_parts[-3:]) # Street, City, State
-        if level == 2 and len(unique_parts) >= 2:
-            return ", ".join(unique_parts[-2:]) # City, State only
+        if level == 1 and len(unique_parts) > 2: return ", ".join(unique_parts[-3:])
+        if level == 2 and len(unique_parts) >= 2: return ", ".join(unique_parts[-2:])
         return ", ".join(unique_parts)
 
     async def fetch_coords(addr, client):
-        # FIXED: Removed the leading '[' and markdown formatting from URL
+        # FIXED: Pure URL string with no brackets
         url = f"[https://nominatim.openstreetmap.org/search?q=](https://nominatim.openstreetmap.org/search?q=){addr}&format=json&limit=1"
         try:
             r = await client.get(url, headers={"User-Agent": "LazyBot_Logistics/2.0"}, timeout=10)
@@ -91,7 +83,7 @@ async def get_miles_free(origin: str, destination: str) -> str:
 
         if o_coords and d_coords:
             try:
-                # FIXED: Removed leading '[' and parenthesis from URL
+                # FIXED: Pure URL string with no brackets
                 osrm_url = f"[http://router.project-osrm.org/route/v1/driving/](http://router.project-osrm.org/route/v1/driving/){o_coords[1]},{o_coords[0]};{d_coords[1]},{d_coords[0]}?overview=false"
                 res = await client.get(osrm_url, timeout=10)
                 if res.status_code == 200:
@@ -99,34 +91,12 @@ async def get_miles_free(origin: str, destination: str) -> str:
                     return str(round(meters * 0.000621371, 1))
             except Exception as e:
                 logger.error(f"OSRM Route Error: {e}")
-                
     return "N/A"
 
 async def deepseek_ai_extract(text: str) -> dict:
-    """AI handles the Broker Name and ALL stops with high precision 🧠"""
+    """AI handles the Broker Name and ALL stops 🧠"""
     if not DEEPSEEK_API_KEY: return None
-    
-    prompt = f"""
-Analyze this US Logistics Rate Confirmation. RETURN ONLY VALID JSON.
-CRITICAL GUIDELINES:
-1. BROKER: Identify the actual COMPANY NAME. Ignore names like 'Adrian Santos'.
-2. ALL STOPS: Capture EVERY pickup (PU) and EVERY delivery (SO/Stop) in the document. Do not skip stops.
-3. ADRESSES: Extract the full address (Street, City, ST, Zip).
-4. LOAD ID: Use the 'Load Number' or 'PRO #'.
-
-Return JSON:
-{{
-  "broker": "Company Name Only",
-  "load_number": "ID",
-  "pickups": [{{ "facility": "Name", "address": "Full Address", "time": "Time" }}],
-  "deliveries": [{{ "facility": "Name", "address": "Full Address", "time": "Time" }}],
-  "rate": "0.00",
-  "total_miles": "0"
-}}
-
-TEXT:
-{text[:12000]}
-"""
+    prompt = f"Analyze US Rate Confirmation. RETURN VALID JSON. Extract Broker, Load#, and ALL Stops.\n\nTEXT:\n{text[:12000]}"
     async with httpx.AsyncClient() as client:
         try:
             response = await client.post(
@@ -135,7 +105,7 @@ TEXT:
                 json={
                     "model": "deepseek-chat",
                     "messages": [
-                        {"role": "system", "content": "You are a US Logistics Specialist. You capture every single stop on a multi-stop load confirmation without exception."},
+                        {"role": "system", "content": "You are a Logistics Expert. Extract all stops accurately."},
                         {"role": "user", "content": prompt}
                     ],
                     "temperature": 0
@@ -151,22 +121,16 @@ TEXT:
 
 async def smart_extract(text: str) -> dict:
     logger.info("Starting Multi-Stop Cumulative Extraction Pipeline... 💅")
-    
     data = await deepseek_ai_extract(text)
-    
-    if not data:
-        data = {"broker": "N/A", "load_number": "", "rate": "", "total_miles": "N/A"}
+    if not data: data = {"broker": "N/A", "load_number": "", "rate": "", "total_miles": "N/A"}
 
-    # 1. Regex Overlays (Safety fallback for IDs and Rates)
+    # Regex Overlays
     if load_match := LOAD_RE.search(text):
-        if not data.get("load_number") or data["load_number"] == "ID":
-            data["load_number"] = load_match.group(1)
-
+        if not data.get("load_number") or data["load_number"] == "ID": data["load_number"] = load_match.group(1)
     if rate_match := RATE_RE.search(text):
-        if not data.get("rate") or data["rate"] == "0.00":
-            data["rate"] = rate_match.group(1)
+        if not data.get("rate") or data["rate"] == "0.00": data["rate"] = rate_match.group(1)
 
-    # 2. Cumulative Mileage Logic: Leg 1 + Leg 2 + ...
+    # Cumulative Mileage Logic: Leg 1 + Leg 2 + ...
     if not data.get("total_miles") or str(data["total_miles"]) in ["", "N/A", "0"]:
         if data.get("pickups") and data.get("deliveries"):
             all_stops = data["pickups"] + data["deliveries"]
@@ -176,9 +140,9 @@ async def smart_extract(text: str) -> dict:
             for i in range(len(all_stops) - 1):
                 seg_origin = all_stops[i]["address"]
                 seg_dest = all_stops[i+1]["address"]
+                logger.info(f"🛣️ Calculating Leg {i+1}: {seg_origin} TO {seg_dest}")
                 
                 seg_miles = await get_miles_free(seg_origin, seg_dest)
-                
                 if seg_miles != "N/A":
                     total_cumulative_miles += float(seg_miles)
                     valid_segments += 1
@@ -187,5 +151,4 @@ async def smart_extract(text: str) -> dict:
                 data["total_miles"] = str(round(total_cumulative_miles, 1))
             else:
                 data["total_miles"] = "N/A"
-            
     return data
