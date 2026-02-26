@@ -13,7 +13,7 @@ logger = logging.getLogger("Extractor")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
 
-# 1. High-Performance Regex Patterns (Alphanumeric for PRO/Load IDs)
+# 1. High-Performance Regex Patterns (Numeric/Rate fallback only)
 LOAD_RE = re.compile(r"(?:PRO\s*#|Load\s*#|Order\s*#|Reference\s*#)[:\s]*([0-9A-Z-]{5,15})", re.I)
 RATE_RE = re.compile(r"(?:Total\s*Rate|Total\s*Carrier\s*Pay|Total\s*Pay|Rate)[:\s]*\$?\s*([\d,]+\.\d{2})", re.I)
 MILES_RE = re.compile(r"(?:Total\s*Miles|Distance|Miles)[:\s]*([\d.,]+)", re.I)
@@ -46,41 +46,10 @@ async def extract_template_structure(system_prompt: str, user_example: str) -> s
             logger.error(f"Template Extraction Error: {e}")
             return user_example
 
-def regex_extract(text: str) -> dict:
-    """Fast extraction to save tokens on basic fields 💰"""
-    data = {"broker": "", "load_number": "", "rate": "", "total_miles": ""}
-    
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
-    
-    # Alice is now trained to ignore phone numbers and headers 💅
-    for line in lines[:12]:
-        # Skip dates (XX/XX/XX)
-        if re.search(r'\d{1,2}/\d{1,2}/\d{2,4}', line): continue
-        # Skip PRO # or Rate Confirmation headers
-        if re.search(r'PRO\s*#|Rate\s*Confirmation|Page\s*\d', line, re.I): continue
-        # Skip phone numbers like (704) 706-4909
-        if re.search(r'\(\d{3}\)\s*\d{3}-\d{4}', line): continue
-        # Skip lines that are just noise or too short
-        if len(line) < 5 or line.startswith('('): continue
-        
-        # If it passes all checks, it's our Broker!
-        data["broker"] = line[:100]
-        break
-
-    if load_match := LOAD_RE.search(text):
-        data["load_number"] = load_match.group(1)
-    if rate_match := RATE_RE.search(text):
-        data["rate"] = rate_match.group(1)
-    if miles_match := MILES_RE.search(text):
-        data["total_miles"] = miles_match.group(1)
-        
-    return data
-
 async def get_miles_free(origin: str, destination: str) -> str:
     """Alice calculates distance by stripping facility noise for OSRM 🗺️"""
     if not origin or not destination: return ""
     
-    # Clean facility names so geocoding only sees the address
     clean_regex = r'^(?:FMC|JASPER|ARMSTRONG|PLANT \d+|DC|RESUPPLY|FPDC|WAREHOUSE|LOGISTICS)\s+'
     o_addr = re.sub(clean_regex, '', origin, flags=re.I).strip()
     d_addr = re.sub(clean_regex, '', destination, flags=re.I).strip()
@@ -108,19 +77,22 @@ async def get_miles_free(origin: str, destination: str) -> str:
     return ""
 
 async def deepseek_ai_extract(text: str) -> dict:
-    """AI handles the complex address blocks and stop verification 🧠"""
+    """AI handles the Broker Name and Stops with high precision 🧠"""
     if not DEEPSEEK_API_KEY: return None
     
     prompt = f"""
 Analyze this US Logistics Rate Confirmation. RETURN ONLY VALID JSON.
-CRITICAL: Prioritize 'PRO #' as the main Load ID.
+GUIDELINES:
+1. BROKER: Identify the actual COMPANY NAME. Ignore contact names or personal names like 'Hamilton Smith'.
+2. STOPS: Extract full facility, address, and appointment time.
+3. LOAD ID: Find the PRO # or Load #.
 
 Return JSON:
 {{
-  "broker": "Full Legal Company Name",
+  "broker": "Company Name Only",
   "load_number": "ID",
-  "pickups": [{{ "facility": "Name", "address": "Full Address", "time": "Date/Time" }}],
-  "deliveries": [{{ "facility": "Name", "address": "Full Address", "time": "Date/Time" }}],
+  "pickups": [{{ "facility": "Name", "address": "Full Address", "time": "Time" }}],
+  "deliveries": [{{ "facility": "Name", "address": "Full Address", "time": "Time" }}],
   "rate": "0.00",
   "total_miles": "0"
 }}
@@ -136,7 +108,7 @@ TEXT:
                 json={
                     "model": "deepseek-chat",
                     "messages": [
-                        {"role": "system", "content": "You are a US Logistics Specialist. Prioritize PRO # for Load ID."},
+                        {"role": "system", "content": "You are a US Logistics Specialist. Prioritize accurate Broker Company identification."},
                         {"role": "user", "content": prompt}
                     ],
                     "temperature": 0
@@ -151,30 +123,29 @@ TEXT:
             return None
 
 async def smart_extract(text: str) -> dict:
-    logger.info("Starting Universal Extraction Pipeline... 💅")
+    logger.info("Starting AI-Driven Extraction Pipeline... 💅")
     
-    # 1. Regex First (Cost: $0)
-    data = regex_extract(text)
+    # 1. AI Primary Extraction (Crucial for Broker Name and Addresses)
+    data = await deepseek_ai_extract(text)
     
-    # 2. AI Second for Stops and Verification
-    ai_data = await deepseek_ai_extract(text)
-    
-    if ai_data:
-        data["pickups"] = ai_data.get("pickups", [])
-        data["deliveries"] = ai_data.get("deliveries", [])
-        
-        # Priority: Trust Regex if it caught the ID/Broker clearly
-        if not data["load_number"]: data["load_number"] = ai_data.get("load_number")
-        if not data["rate"] or data["rate"] == "0.00": data["rate"] = ai_data.get("rate")
-        
-        # CRITICAL: Trust PDF mileage (Regex) before map calculations
-        if not data["total_miles"] or data["total_miles"] == "0": 
-            data["total_miles"] = ai_data.get("total_miles")
-        
-        # If Regex failed to find broker cleanly, take AI's best guess
-        if not data["broker"]: data["broker"] = ai_data.get("broker")
+    if not data:
+        # Fallback dictionary if AI fails completely
+        data = {"broker": "N/A", "load_number": "", "rate": "", "total_miles": ""}
 
-    # 3. Final Mileage Check (ONLY if both PDF and AI completely failed)
+    # 2. Regex Secondary Check (Quick verification for Numeric IDs/Rates)
+    if load_match := LOAD_RE.search(text):
+        if not data.get("load_number") or data["load_number"] == "ID":
+            data["load_number"] = load_match.group(1)
+
+    if rate_match := RATE_RE.search(text):
+        if not data.get("rate") or data["rate"] == "0.00":
+            data["rate"] = rate_match.group(1)
+
+    if miles_match := MILES_RE.search(text):
+        if not data.get("total_miles") or data["total_miles"] == "0":
+            data["total_miles"] = miles_match.group(1)
+            
+    # Final check for miles via map if still missing
     if not data.get("total_miles") or str(data["total_miles"]) in ["", "N/A", "0"]:
         if data.get("pickups") and data.get("deliveries"):
             miles = await get_miles_free(data["pickups"][0]["address"], data["deliveries"][-1]["address"])
