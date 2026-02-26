@@ -52,10 +52,12 @@ def regex_extract(text: str) -> dict:
     
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     
-    # Smarter Broker Logic: Skip lines that look like dates or PRO numbers
-    # This prevents the "Broker: PRO# 62055 Rate Confirmation..." bug
-    for line in lines[:5]:
-        if not re.search(r'\d{2}/\d{2}/\d{2}', line) and not re.search(r'PRO\s*#', line, re.I):
+    # Alice skips the headers (PRO #, Date, EST) to find the REAL broker 💅
+    # This specifically addresses the "Broker: PRO# 62055..." bug
+    for line in lines[:6]:
+        # Skip if line contains a date (XX/XX/XX) or "PRO #" or "Rate Confirmation"
+        if not re.search(r'\d{1,2}/\d{1,2}/\d{2,4}', line) and \
+           not re.search(r'PRO\s*#|Rate\s*Confirmation|Page\s*\d', line, re.I):
             data["broker"] = line[:100]
             break
 
