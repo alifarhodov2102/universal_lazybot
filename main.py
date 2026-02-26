@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import time
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.enums import ParseMode
@@ -12,7 +13,7 @@ from database.connection import init_db, AsyncSessionLocal
 from handlers import start, settings, billing, processor, admin
 from utils.middlewares import SubscriptionMiddleware, ThrottlingMiddleware
 
-# Import the necessary background components from processor
+# Import tracking objects from processor
 from handlers.processor import user_workers, media_group_tracker
 
 # 1. Configure logging
@@ -28,6 +29,23 @@ async def clear_media_tracker_periodic():
         await asyncio.sleep(3600)  # Every hour
         media_group_tracker.clear()
         logger.info("🧹 Media group tracker cleared. Alice likes it clean.")
+
+async def cleanup_temp_files():
+    """Alice throws away old trash (PDFs > 24h) to save space. 🗑️💅"""
+    while True:
+        now = time.time()
+        temp_dir = "temp"
+        if os.path.exists(temp_dir):
+            for f in os.listdir(temp_dir):
+                f_path = os.path.join(temp_dir, f)
+                # If file is older than 24 hours
+                if os.stat(f_path).st_mtime < now - 86400:
+                    try:
+                        os.remove(f_path)
+                        logger.info(f"🗑️ Deleted old temp file: {f}")
+                    except Exception as e:
+                        logger.error(f"Failed to delete {f}: {e}")
+        await asyncio.sleep(43200)  # Runs every 12 hours
 
 async def on_startup(bot: Bot):
     """Alice performs a self-surgery on the database 🏥💅"""
@@ -59,8 +77,8 @@ async def on_startup(bot: Bot):
             logger.warning(f"Database sync note: {e}")
     
     # 🚀 START BACKGROUND TASKS
-    # The individual user workers are started dynamically in processor.py
     asyncio.create_task(clear_media_tracker_periodic())
+    asyncio.create_task(cleanup_temp_files())
     
     logger.info("Alice is fully awake and ready to judge your PDFs. 💅")
 
