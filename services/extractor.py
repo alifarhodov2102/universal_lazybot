@@ -144,18 +144,19 @@ async def get_miles_free(origin: str, destination: str) -> str:
     return "N/A"
 
 async def deepseek_ai_extract(text: str) -> dict:
-    """AI handles the Broker Name, Weight, References, and ALL stops with high precision 🧠"""
+    """AI handles the Broker Name, Weight, References, and ALL stops with dates and times 🧠"""
     if not DEEPSEEK_API_KEY: return None
     
     prompt = f"""
 Analyze this US Logistics Rate Confirmation. RETURN ONLY VALID JSON.
 CRITICAL GUIDELINES:
 1. BROKER: Identify the actual COMPANY NAME.
-2. WEIGHT: Extract the total shipment weight in lbs (e.g., 40,000 lbs). Check commodity or load details.
-3. REFERENCES: Specifically look for PU#, DEL#, BOL#, and PO# / Ref#. Do not use phone numbers or dates.
-4. ALL STOPS: Capture EVERY pickup (PU) and EVERY delivery (SO/Stop).
-5. ADDRESSES: Extract the full address (Street, City, ST, Zip).
-6. LOAD ID: Use the 'Load Number' or 'PRO #'.
+2. WEIGHT: Extract the total shipment weight in lbs (e.g., 43,563 lbs). Check commodity or load details.
+3. REFERENCES: Specifically look for PU#, DEL#, BOL#, and PO# / Ref#. Do not use phone numbers.
+4. ALL STOPS: Capture EVERY pickup (PU) and EVERY delivery (DEL/Stop).
+5. DATES & TIMES: For each stop, combine the Date and Time into one string (e.g., "06/19/2025 07:00-14:30").
+6. ADDRESSES: Extract the full address (Street, City, ST, Zip).
+7. LOAD ID: Use the 'Load Number' or 'OR#'.
 
 Return JSON:
 {{
@@ -166,8 +167,8 @@ Return JSON:
   "del_number": "N/A",
   "bol_number": "N/A",
   "ref_number": "N/A",
-  "pickups": [{{ "facility": "Name", "address": "Full Address", "time": "Time" }}],
-  "deliveries": [{{ "facility": "Name", "address": "Full Address", "time": "Time" }}],
+  "pickups": [{{ "facility": "Name", "address": "Full Address", "time": "MM/DD/YYYY HH:MM" }}],
+  "deliveries": [{{ "facility": "Name", "address": "Full Address", "time": "MM/DD/YYYY HH:MM" }}],
   "rate": "0.00",
   "total_miles": "0"
 }}
@@ -183,8 +184,11 @@ TEXT:
                 json={
                     "model": "deepseek-chat",
                     "messages": [
-                        {"role": "system", "content": "You are a US Logistics Specialist. You find all reference numbers, weights, and capture every single stop without exception."},
-                        {"role": "user", "content": prompt}
+                        {{
+                            "role": "system", 
+                            "content": "You are a US Logistics Specialist. You find all reference numbers, weights, and capture every single stop with both date and time."
+                        }},
+                        {{"role": "user", "content": prompt}}
                     ],
                     "temperature": 0
                 },

@@ -45,7 +45,7 @@ def _format_address(addr: str) -> str:
     return f"<code>{display_addr}</code>"
 
 def _build_multi_stop_string(pickups: list, deliveries: list) -> str:
-    """Loops through ALL pickups and ALL deliveries for multi-stop loads. 🧠"""
+    """Loops through ALL pickups and ALL deliveries with combined Date/Time info. 🧠"""
     stop_lines = []
     
     # Process all Pickups
@@ -57,7 +57,8 @@ def _build_multi_stop_string(pickups: list, deliveries: list) -> str:
         stop_lines.append(f"<b>📍PU{i}:</b>")
         if facility: stop_lines.append(facility)
         if address: stop_lines.append(address)
-        if time: stop_lines.append(f"TIME: {time}")
+        # Using the emoji and bold label to highlight the combined Date/Time
+        if time: stop_lines.append(f"📅 <b>INFO:</b> {time}")
         stop_lines.append("—————————————")
 
     # Process all Deliveries
@@ -69,7 +70,8 @@ def _build_multi_stop_string(pickups: list, deliveries: list) -> str:
         stop_lines.append(f"<b>📍DEL{i}:</b>")
         if facility: stop_lines.append(facility)
         if address: stop_lines.append(address)
-        if time: stop_lines.append(f"TIME: {time}")
+        # Using the emoji and bold label to highlight the combined Date/Time
+        if time: stop_lines.append(f"📅 <b>INFO:</b> {time}")
         if i < len(deliveries): stop_lines.append("—————————————")
     
     return "\n".join(stop_lines)
