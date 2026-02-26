@@ -19,16 +19,38 @@ RATE_RE = re.compile(r"(?:Total\s*Rate|Total\s*Pay|Base\s*Rate|Rate)[:\s]*\$?\s*
 MILES_RE = re.compile(r"(?:Total\s*Miles|Distance|Miles)[:\s]*([\d.,]+)", re.I)
 
 async def extract_template_structure(system_prompt: str, user_example: str) -> str:
-    """Alice turns a real load message into a clean skeleton 🧠💅"""
-    enhanced_prompt = system_prompt + """
-    CRITICAL INSTRUCTION: If the example contains multiple stops (PU1, DEL1, DEL2, etc.), 
-    replace that entire section with a single {{ stops_info }} tag. 
-    Ensure the resulting skeleton is clean and scannable.
-    """
+    """Alice smartly learns your style or appends notes to her default. 🧠💅"""
     
-    if not DEEPSEEK_API_KEY:
-        logger.error("DEEPSEEK_API_KEY missing!")
-        return user_example
+    # Check if the user only sent notes (no typical broker/load keywords)
+    is_only_notes = not any(key in user_example.upper() for key in ["BROKER", "LOAD", "ID", "PU#"])
+    
+    if is_only_notes:
+        logger.info("User sent only notes. Appending to Alice's default style... 💅")
+        # Start with Alice's perfected default structure
+        default_skeleton = """
+<b>{{ broker }}</b>
+
+<b>Load#</b> <code>{{ load_number }}</code>
+{% if ref_number and ref_number != 'N/A' %}<b>Ref#</b> <code>{{ ref_number }}</code>{% endif %}
+
+{% if bol_number and bol_number != 'N/A' %}<b>BOL#</b> <code>{{ bol_number }}</code>{% endif %}
+{% if pu_number and pu_number != 'N/A' %}<b>PU#</b> <code>{{ pu_number }}</code>{% endif %}
+{% if del_number and del_number != 'N/A' %}<b>DEL#</b> <code>{{ del_number }}</code>{% endif %}
+
+{{ stops_info }}
+—————————————
+<b>PER MILE:</b> {{ per_mile }}
+<b>DURATION:</b> {{ duration }}
+
+<b>WEIGHT:</b> {{ weight }}
+<b>TOTAL MILES:</b> {{ total_miles }}
+<b>RATE:</b> {{ rate }}
+"""
+        # Simply append the user's notes at the bottom
+        return f"{default_skeleton.strip()}\n\n{user_example.strip()}"
+
+    # If it looks like a full template, let AI learn the skeleton as usual
+    if not DEEPSEEK_API_KEY: return user_example
 
     async with httpx.AsyncClient() as client:
         try:
@@ -38,7 +60,7 @@ async def extract_template_structure(system_prompt: str, user_example: str) -> s
                 json={
                     "model": "deepseek-chat",
                     "messages": [
-                        {"role": "system", "content": enhanced_prompt},
+                        {"role": "system", "content": system_prompt + "\nReplace stops with {{ stops_info }}."},
                         {"role": "user", "content": user_example}
                     ],
                     "temperature": 0.1
