@@ -55,20 +55,26 @@ async def extract_template_structure(system_prompt: str, user_example: str) -> s
             return user_example
 
 async def get_miles_free(origin: str, destination: str) -> str:
-    """Alice calculates distance by stripping facility noise for OSRM 🗺️"""
     if not origin or not destination: return ""
     
-    # Refined cleaning: Remove common facility noise but keep the address/city intact
-    # This prevents Poland Spring, ME from being completely stripped
-    clean_regex = r'^(?:FMC|JASPER|ARMSTRONG|PLANT \d+|DC|RESUPPLY|FPDC|WAREHOUSE|LOGISTICS|NAME:)\s+'
-    o_addr = re.sub(clean_regex, '', origin, flags=re.I).strip()
-    d_addr = re.sub(clean_regex, '', destination, flags=re.I).strip()
+    def clean_for_map(addr):
+        # 1. Remove Facility Prefixes 
+        addr = re.sub(r'^(?:FMC|JASPER|ARMSTRONG|PLANT \d+|DC|RESUPPLY|FPDC|WAREHOUSE|LOGISTICS|NAME:)\s+', '', addr, flags=re.I)
+        # 2. Fix Duplicate Address Lines (e.g., 109 Poland Spring Dr, 109 Poland Spring Dr) 
+        parts = [p.strip() for p in addr.split(",")]
+        unique_parts = []
+        for p in parts:
+            if p not in unique_parts: unique_parts.append(p)
+        return ", ".join(unique_parts)
+
+    o_addr = clean_for_map(origin)
+    d_addr = clean_for_map(destination)
 
     try:
         async with httpx.AsyncClient() as client:
             async def get_coords(addr):
-                # We use a proper URL to avoid bracket noise
-                url = f"[https://nominatim.openstreetmap.org/search?q=](https://nominatim.openstreetmap.org/search?q=){addr}&format=json&limit=1"
+                # We use a proper URL to avoid bracket noise 
+                url = f"https://nominatim.openstreetmap.org/search?q={addr}&format=json&limit=1"
                 r = await client.get(url, headers={"User-Agent": "LazyBot_Logistics/2.0"}, timeout=15)
                 if r.status_code == 200 and r.json():
                     return r.json()[0]["lat"], r.json()[0]["lon"]
@@ -78,11 +84,10 @@ async def get_miles_free(origin: str, destination: str) -> str:
             d_coords = await get_coords(d_addr)
 
             if o_coords and d_coords:
-                osrm_url = f"[http://router.project-osrm.org/route/v1/driving/](http://router.project-osrm.org/route/v1/driving/){o_coords[1]},{o_coords[0]};{d_coords[1]},{d_coords[0]}?overview=false"
+                osrm_url = f"http://router.project-osrm.org/route/v1/driving/{o_coords[1]},{o_coords[0]};{d_coords[1]},{d_coords[0]}?overview=false"
                 res = await client.get(osrm_url, timeout=10)
                 if res.status_code == 200:
                     meters = res.json()["routes"][0]["distance"]
-                    # Convert meters to miles
                     return str(round(meters * 0.000621371, 1))
     except Exception as e:
         logger.error(f"OSRM Error: {e}")
