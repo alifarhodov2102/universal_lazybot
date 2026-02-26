@@ -1,17 +1,16 @@
 from jinja2 import Template, exceptions
 import re
 
-# Alice's final polished style 💅
-# Layout: Broker -> Numbers -> Stops -> Per Mile/Duration -> Stats
+# Alice's final polished style with copyable IDs and Addresses 💅
 DEFAULT_TEMPLATE = """
 <b>{{ broker }}</b>
 
-<b>Load#</b> {{ load_number }}
+<b>Load#</b> <code>{{ load_number }}</code>
+{% if ref_number and ref_number != 'N/A' %}<b>Ref#</b> <code>{{ ref_number }}</code>{% endif %}
 
-{% if ref_number and ref_number != 'N/A' %}<b>Ref#</b> {{ ref_number }}{% endif %}
-{% if bol_number and bol_number != 'N/A' %}<b>BOL#</b> {{ bol_number }}{% endif %}
-{% if pu_number and pu_number != 'N/A' %}<b>PU#</b> {{ pu_number }}{% endif %}
-{% if del_number and del_number != 'N/A' %}<b>DEL#</b> {{ del_number }}{% endif %}
+{% if bol_number and bol_number != 'N/A' %}<b>BOL#</b> <code>{{ bol_number }}</code>{% endif %}
+{% if pu_number and pu_number != 'N/A' %}<b>PU#</b> <code>{{ pu_number }}</code>{% endif %}
+{% if del_number and del_number != 'N/A' %}<b>DEL#</b> <code>{{ del_number }}</code>{% endif %}
 
 {{ stops_info }}
 —————————————
@@ -24,7 +23,7 @@ DEFAULT_TEMPLATE = """
 """
 
 def _format_address(addr: str) -> str:
-    """Alice makes the address readable by forcing City, State Zip to a new line. 💅"""
+    """Alice makes the address readable and copyable with one tap. 💅"""
     if not addr: return ""
     
     # Remove internal duplicates (e.g., "300 N GALLERIA DR, 300 N GALLERIA DR")
@@ -37,9 +36,13 @@ def _format_address(addr: str) -> str:
     if len(unique_parts) >= 2:
         street = unique_parts[0]
         location = ", ".join(unique_parts[1:])
-        return f"{street},\n{location}"
+        display_addr = f"{street},\n{location}"
+        copy_addr = f"{street}, {location}"
+    else:
+        display_addr = copy_addr = ", ".join(unique_parts)
         
-    return ", ".join(unique_parts)
+    # We wrap the display text in <code> tags so the whole block is copyable on tap
+    return f"<code>{display_addr}</code>"
 
 def _build_multi_stop_string(pickups: list, deliveries: list) -> str:
     """Loops through ALL pickups and ALL deliveries for multi-stop loads. 🧠"""
@@ -76,7 +79,6 @@ def _calculate_drive_duration(miles_float: float) -> str:
     if miles_float <= 0:
         return "N/A"
     
-    # Average 50mph including minor breaks + 2 hours for stop handling
     total_hours = (miles_float / 50) + 2
     hours = int(total_hours)
     minutes = int((total_hours - hours) * 60)
@@ -116,11 +118,11 @@ def render_result(data: dict, user_template: str = None) -> str:
     clean_data = {
         "broker": (data.get("broker") or "N/A").strip(),
         "load_number": (data.get("load_number") or "N/A").strip(),
-        "weight": (data.get("weight") or "N/A").strip(),
         "pu_number": (data.get("pu_number") or "N/A").strip(),
         "del_number": (data.get("del_number") or "N/A").strip(),
         "bol_number": (data.get("bol_number") or "N/A").strip(),
         "ref_number": (data.get("ref_number") or "N/A").strip(),
+        "weight": (data.get("weight") or "N/A").strip(),
         "rate": rate_display,
         "total_miles": miles_display,
         "per_mile": per_mile,
@@ -129,15 +131,12 @@ def render_result(data: dict, user_template: str = None) -> str:
     }
 
     tmpl_str = user_template if user_template else DEFAULT_TEMPLATE
-    
-    # Clean template logic: remove manual 'mi' if it's already in our display
     tmpl_str = tmpl_str.replace('{{ total_miles }} mi', '{{ total_miles }}')
 
     try:
         template = Template(tmpl_str)
         rendered_text = template.render(**clean_data)
         
-        # Remove triple-newlines to keep it tight
         return re.sub(r'\n{3,}', '\n\n', rendered_text).strip()
     
     except exceptions.TemplateError as e:
