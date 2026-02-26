@@ -1,15 +1,19 @@
 import asyncio
 import logging
+import os
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from sqlalchemy import text # Required for the auto-fix migration 🛠️
+from sqlalchemy import text
 
 from config import BOT_TOKEN
-from database.connection import init_db, AsyncSessionLocal # Added SessionLocal for migration
+from database.connection import init_db, AsyncSessionLocal
 from handlers import start, settings, billing, processor, admin
 from utils.middlewares import SubscriptionMiddleware, ThrottlingMiddleware
+
+# Import the necessary background components from processor
+from handlers.processor import user_workers, media_group_tracker
 
 # 1. Configure logging
 logging.basicConfig(
@@ -18,19 +22,30 @@ logging.basicConfig(
 )
 logger = logging.getLogger("LazyAlice")
 
+async def clear_media_tracker_periodic():
+    """Alice cleans her room every hour so she doesn't run out of memory. 💅"""
+    while True:
+        await asyncio.sleep(3600)  # Every hour
+        media_group_tracker.clear()
+        logger.info("🧹 Media group tracker cleared. Alice likes it clean.")
+
 async def on_startup(bot: Bot):
     """Alice performs a self-surgery on the database 🏥💅"""
     logger.info("Waking up Alice's memory... 🧠")
     
-    # Initialize basic tables
+    # Ensure temporary storage exists for PDFs
+    if not os.path.exists("temp"):
+        os.makedirs("temp")
+        logger.info("📁 Created 'temp' folder for PDF processing.")
+
+    # Initialize basic database tables
     await init_db()
     
     # --- AUTO-MIGRATION LOGIC ---
-    # This fixes the 'UndefinedColumnError' automatically on Railway
+    # Automatically handles Railway database synchronization
     async with AsyncSessionLocal() as session:
         try:
             logger.info("Synchronizing database columns... ⚙️")
-            # Postgres-specific 'IF NOT EXISTS' equivalent logic
             await session.execute(text(
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_requests INTEGER DEFAULT 0;"
             ))
@@ -41,7 +56,11 @@ async def on_startup(bot: Bot):
             logger.info("✅ Database columns synchronized successfully! 💅")
         except Exception as e:
             await session.rollback()
-            logger.warning(f"Database sync note (might already be fixed): {e}")
+            logger.warning(f"Database sync note: {e}")
+    
+    # 🚀 START BACKGROUND TASKS
+    # The individual user workers are started dynamically in processor.py
+    asyncio.create_task(clear_media_tracker_periodic())
     
     logger.info("Alice is fully awake and ready to judge your PDFs. 💅")
 
@@ -52,7 +71,7 @@ async def main():
         default=DefaultBotProperties(parse_mode=ParseMode.HTML)
     )
     
-    # Alice needs MemoryStorage to remember states (Broadcasts, Searches, etc.) ☕
+    # MemoryStorage allows Alice to remember user states
     dp = Dispatcher(storage=MemoryStorage())
 
     # 3. Register Startup Hook
@@ -63,7 +82,7 @@ async def main():
     dp.message.middleware(SubscriptionMiddleware())
 
     # 5. Include Routers
-    # Admin first to catch panel interactions, Processor last for heavy lifting.
+    # Admin first to catch panel interactions, Processor last for the heavy lifting.
     dp.include_router(admin.router) 
     dp.include_router(start.router)
     dp.include_router(settings.router)
