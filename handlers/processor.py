@@ -26,10 +26,10 @@ user_queues: dict[int, asyncio.Queue] = {}
 user_workers: dict[int, asyncio.Task] = {}
 media_group_tracker: dict[str, int] = {} 
 
-async def check_and_update_limit(uid: int) -> tuple[bool, int]:
-    """Alice performs a deep check of the user's status. 💅"""
+async def check_and_update_limit(uid: int) -> tuple[bool, int, str]:
+    """Alice checks status and fetches the template while the DB session is active. 💅"""
     async with AsyncSessionLocal() as session:
-        # Force the session to forget any cached data to see the LATEST Pro status
+        # Force fresh data to ensure Pro status is recognized immediately
         session.expire_all()
         
         stmt = select(User).where(User.tg_id == uid)
@@ -37,28 +37,26 @@ async def check_and_update_limit(uid: int) -> tuple[bool, int]:
         user = res.scalar_one_or_none()
         
         if not user:
-            return False, 0
+            return False, 0, None
             
-        # 1. PRIORITY CHECK: Admins and Active Pro Users
         is_admin = uid in ADMIN_IDS
-        
-        # We check is_pro and ensure the expiry date hasn't passed (or is not set)
         current_time = datetime.utcnow()
-        is_pro_active = False
         
+        # Determine if Pro is active
+        is_pro_active = False
         if user.is_pro:
             if user.expiry_date is None or user.expiry_date > current_time:
                 is_pro_active = True
         
-        # Logging for your Railway console to debug why someone is being rejected
+        user_template = user.template_text # Capture template here to avoid DB calls in worker
+        
         logger.info(f"User {uid} check: Admin={is_admin}, Pro={is_pro_active}, Used={user.daily_requests}")
 
         if is_admin or is_pro_active:
-            return True, 999
+            return True, 999, user_template
 
-        # 2. Free User Logic
+        # Free User Logic
         today = date.today()
-        # Reset the counter if it's a brand new day
         if user.last_request_date < today:
             user.daily_requests = 0
             user.last_request_date = today
@@ -66,16 +64,14 @@ async def check_and_update_limit(uid: int) -> tuple[bool, int]:
             await session.refresh(user)
         
         if user.daily_requests >= 10:
-            return False, 0
+            return False, 0, user_template
             
-        # Increment request count for free users only
         user.daily_requests += 1
         await session.commit()
-        
-        return True, (10 - user.daily_requests)
+        return True, (10 - user.daily_requests), user_template
 
 async def safe_edit_status(bot: Bot, chat_id: int, message_id: int, new_text: str):
-    """Safely updates status messages without crashing. 💅"""
+    """Alice safely updates her status without crashing. 💅"""
     try:
         return await bot.edit_message_text(
             text=new_text,
@@ -90,8 +86,8 @@ async def safe_edit_status(bot: Bot, chat_id: int, message_id: int, new_text: st
         pass
     return None
 
-async def process_user_queue(uid: int, bot: Bot):
-    """Worker logic: Processes the user's personal queue one by one. ☕"""
+async def process_user_queue(uid: int, bot: Bot, template: str):
+    """Worker logic: Processes the user's personal queue. Template is pre-passed. ☕"""
     q = user_queues.get(uid)
     if not q: return
 
@@ -126,12 +122,7 @@ async def process_user_queue(uid: int, bot: Bot):
                 
                 data = await ai_task
                 
-                async with AsyncSessionLocal() as session:
-                    stmt = select(User).where(User.tg_id == uid)
-                    res = await session.execute(stmt)
-                    user = res.scalar_one_or_none()
-                    template = user.template_text if user else None
-
+                # Render using the template fetched before the long AI wait
                 formatted_output = render_result(data, template)
                 
                 await bot.send_message(
@@ -159,8 +150,8 @@ async def handle_pdf(message: types.Message, bot: Bot):
     uid = message.from_user.id
     mg_id = message.media_group_id
 
-    # 1. Check Limits First
-    allowed, left = await check_and_update_limit(uid)
+    # 1. Check Limits and Fetch Template immediately
+    allowed, left, template = await check_and_update_limit(uid)
     if not allowed:
         return await message.answer(
             "💸 <b>Daily Limit Reached!</b>\n\nUpgrade to /plans now. 💅"
@@ -197,9 +188,9 @@ async def handle_pdf(message: types.Message, bot: Bot):
         "reply_to_id": message.message_id 
     })
 
-    # 4. Start Worker
+    # 4. Start Worker with the pre-fetched template
     if uid not in user_workers or user_workers[uid].done():
-        user_workers[uid] = asyncio.create_task(process_user_queue(uid, bot))
+        user_workers[uid] = asyncio.create_task(process_user_queue(uid, bot, template))
 
 @router.message(Command("check_user"))
 async def admin_check_user(message: types.Message):
