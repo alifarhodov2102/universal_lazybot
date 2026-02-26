@@ -8,9 +8,10 @@ DEFAULT_TEMPLATE = """
 
 <b>Load#</b> {{ load_number }}
 {% if ref_number and ref_number != 'N/A' %}<b>Ref#</b> {{ ref_number }}{% endif %}
+
+{% if bol_number and bol_number != 'N/A' %}<b>BOL#</b> {{ bol_number }}{% endif %}
 {% if pu_number and pu_number != 'N/A' %}<b>PU#</b> {{ pu_number }}{% endif %}
 {% if del_number and del_number != 'N/A' %}<b>DEL#</b> {{ del_number }}{% endif %}
-{% if bol_number and bol_number != 'N/A' %}<b>BOL#</b> {{ bol_number }}{% endif %}
 
 {{ stops_info }}
 —————————————
