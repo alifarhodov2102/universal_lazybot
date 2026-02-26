@@ -1,13 +1,16 @@
 import os
 import tempfile
 import asyncio
+import random
 import logging
 from datetime import date, datetime
-from typing import Dict, Any, Callable, Awaitable
+from typing import Dict, Any, Callable, Awaitable, Optional
 
 from aiogram import Router, types, F, Bot
 from aiogram.enums import ParseMode, ChatType
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
 from sqlalchemy import select
 
 from config import ADMIN_IDS
@@ -24,6 +27,7 @@ router = Router()
 # ================= GLOBALS =================
 user_queues: Dict[int, asyncio.Queue] = {}
 user_workers: Dict[int, asyncio.Task] = {}
+media_group_tracker: Dict[str, int] = {}  # ✅ REQUIRED by main.py
 
 MEDIA_GROUP_LIMIT = 5
 FREE_DAILY_LIMIT = 10
@@ -35,16 +39,13 @@ GLOBAL_PROCESS_SEM = asyncio.Semaphore(2)
 TG_SEND_SEM = asyncio.Semaphore(1)
 
 
-# ================= TELEGRAM SAFE CALLS =================
+# ================= TELEGRAM SAFE CALL =================
 async def tg_call_with_retry(
     factory: Callable[[], Awaitable[Any]],
     *,
     max_retries: int = 6,
 ) -> Any:
-    """
-    Retries Telegram calls on flood control (TelegramRetryAfter).
-    """
-    last_exc: Exception | None = None
+    last_exc: Optional[Exception] = None
 
     for _ in range(max_retries):
         try:
@@ -78,7 +79,6 @@ async def safe_edit(bot: Bot, chat_id: int, message_id: int, text: str):
     try:
         return await tg_call_with_retry(_call, max_retries=6)
     except TelegramBadRequest as e:
-        # Ignore harmless "message is not modified"
         if "message is not modified" in str(e).lower():
             return None
         return None
@@ -109,7 +109,6 @@ async def check_and_update_limit(uid: int) -> tuple[bool, int]:
         is_admin = uid in ADMIN_IDS
         now = datetime.utcnow()
 
-        # Pro active?
         is_pro_active = False
         if user.is_pro:
             expiry = user.expiry_date
@@ -158,7 +157,7 @@ async def process_user_queue(uid: int, bot: Bot):
             file_id: str = item["file_id"]
             status_id: int = item["status_msg_id"]
             reply_id: int = item["reply_to_id"]
-            tmp_path: str | None = None
+            tmp_path: Optional[str] = None
 
             try:
                 await safe_edit(bot, chat_id, status_id, "📄 <b>Downloading...</b>")
@@ -177,7 +176,6 @@ async def process_user_queue(uid: int, bot: Bot):
                     await safe_edit(bot, chat_id, status_id, "🧠 <b>Analyzing...</b>")
                     data = await smart_extract(text)
 
-                # Get user's custom template if exists
                 async with AsyncSessionLocal() as session:
                     res = await session.execute(select(User).where(User.tg_id == uid))
                     user = res.scalar_one_or_none()
@@ -226,10 +224,20 @@ async def process_user_queue(uid: int, bot: Bot):
 @router.message(F.document.mime_type == "application/pdf")
 async def handle_pdf(message: types.Message, bot: Bot):
     uid = message.from_user.id
+    mg_id = message.media_group_id
 
     allowed, left = await check_and_update_limit(uid)
     if not allowed:
         return await message.answer("💸 Daily limit reached. Use /plans.", parse_mode=ParseMode.HTML)
+
+    # Keep your previous "5 PDF at once" protection
+    if mg_id:
+        media_group_tracker[mg_id] = media_group_tracker.get(mg_id, 0) + 1
+        if media_group_tracker[mg_id] > MEDIA_GROUP_LIMIT:
+            if media_group_tracker[mg_id] == MEDIA_GROUP_LIMIT + 1:
+                await message.reply("💅 Max 5 PDFs at once. Ignoring the rest.", parse_mode=ParseMode.HTML)
+            return
+        asyncio.create_task(_cleanup_media_group(mg_id))
 
     user_queues.setdefault(uid, asyncio.Queue())
     pos = user_queues[uid].qsize()
@@ -252,22 +260,27 @@ async def handle_pdf(message: types.Message, bot: Bot):
         user_workers[uid] = asyncio.create_task(process_user_queue(uid, bot))
 
 
+async def _cleanup_media_group(mg_id: str):
+    await asyncio.sleep(120)
+    media_group_tracker.pop(mg_id, None)
+
+
 # ================= GROUP TEXT BEHAVIOR =================
 @router.message(F.text & ~F.text.startswith("/"))
 async def sassy_chat(message: types.Message, bot: Bot):
     """
-    - Private: reply short (PDF reminder) OR you can remove this handler if you add handlers/chat.py
-    - Group: reply ONLY if mentioned or replied-to
+    If you use handlers/chat.py for real conversation:
+    - In PRIVATE this handler is basically unused because chat router is included before processor.
+    - In GROUP it will only answer when tagged/replied-to (safe).
     """
     if message.chat.type == ChatType.PRIVATE:
-        return await message.reply("🥱 Send a PDF.", parse_mode=ParseMode.HTML)
+        return  # Let handlers/chat.py handle private chat
 
     me = await bot.get_me()
     username = (me.username or "").lower()
-
     text = (message.text or "").lower()
-    is_mentioned = bool(username) and f"@{username}" in text
 
+    is_mentioned = bool(username) and f"@{username}" in text
     is_reply_to_bot = (
         message.reply_to_message is not None
         and message.reply_to_message.from_user is not None
@@ -275,6 +288,6 @@ async def sassy_chat(message: types.Message, bot: Bot):
     )
 
     if is_mentioned or is_reply_to_bot:
-        return await message.reply("💅 Send a PDF.", parse_mode=ParseMode.HTML)
+        return await message.reply("💅 Tag me and talk, honey.", parse_mode=ParseMode.HTML)
 
     return
