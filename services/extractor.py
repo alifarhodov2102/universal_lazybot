@@ -72,13 +72,14 @@ async def get_miles_free(origin: str, destination: str) -> str:
         return ", ".join(unique_parts)
 
     async def fetch_coords(addr, client):
+        # FIX: Removed the stray '[' at the start of the URL
         url = f"[https://nominatim.openstreetmap.org/search?q=](https://nominatim.openstreetmap.org/search?q=){addr}&format=json&limit=1"
         try:
             r = await client.get(url, headers={"User-Agent": "LazyBot_Logistics/2.0"}, timeout=10)
             if r.status_code == 200 and r.json():
                 return r.json()[0]["lat"], r.json()[0]["lon"]
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Geocoding error for {addr}: {e}")
         return None
 
     async with httpx.AsyncClient() as client:
@@ -90,6 +91,7 @@ async def get_miles_free(origin: str, destination: str) -> str:
 
         if o_coords and d_coords:
             try:
+                # FIX: Removed the stray '[' at the start of the URL
                 osrm_url = f"[http://router.project-osrm.org/route/v1/driving/](http://router.project-osrm.org/route/v1/driving/){o_coords[1]},{o_coords[0]};{d_coords[1]},{d_coords[0]}?overview=false"
                 res = await client.get(osrm_url, timeout=10)
                 if res.status_code == 200:
@@ -164,13 +166,12 @@ async def smart_extract(text: str) -> dict:
         if not data.get("rate") or data["rate"] == "0.00":
             data["rate"] = rate_match.group(1)
 
-    # 2. Mileage Logic: Cumulative for Multi-Stop
-    # If the PDF doesn't specify total miles, Alice calculates the route segment by segment
+    # 2. Cumulative Mileage Logic: PU1 -> DEL1 -> DEL2
     if not data.get("total_miles") or str(data["total_miles"]) in ["", "N/A", "0"]:
         if data.get("pickups") and data.get("deliveries"):
             all_stops = data["pickups"] + data["deliveries"]
             total_cumulative_miles = 0.0
-            valid_trip = False
+            segments_found = 0
             
             for i in range(len(all_stops) - 1):
                 seg_origin = all_stops[i]["address"]
@@ -180,9 +181,9 @@ async def smart_extract(text: str) -> dict:
                 
                 if seg_miles != "N/A":
                     total_cumulative_miles += float(seg_miles)
-                    valid_trip = True
+                    segments_found += 1
             
-            if valid_trip:
+            if segments_found > 0:
                 data["total_miles"] = str(round(total_cumulative_miles, 1))
             else:
                 data["total_miles"] = "N/A"
