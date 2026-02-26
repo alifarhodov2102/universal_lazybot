@@ -54,48 +54,53 @@ async def extract_template_structure(system_prompt: str, user_example: str) -> s
             return user_example
 
 async def get_miles_free(origin: str, destination: str) -> str:
-    """Alice calculates distance by stripping facility noise for OSRM 🗺️"""
-    if not origin or not destination: return ""
+    """Alice calculates distance with triple-fallback logic 🗺️"""
+    if not origin or not destination: return "N/A"
     
-    def clean_for_map(addr, fallback=False):
-        # Remove common facility noise and duplicate lines
+    def clean_addr(addr, level=0):
+        # Level 0: Full cleaned address
+        # Level 1: Street, City, State
+        # Level 2: City, State only (Last resort)
         addr = re.sub(r'^(?:FMC|JASPER|ARMSTRONG|PLANT \d+|DC|RESUPPLY|FPDC|WAREHOUSE|LOGISTICS|NAME:|ADDRESS:)\s+', '', addr, flags=re.I)
-        parts = [p.strip() for p in addr.replace('\n', ',').split(",")]
+        parts = [p.strip() for p in addr.replace('\n', ',').split(",") if p.strip()]
         unique_parts = []
         for p in parts:
-            if p and p not in unique_parts: unique_parts.append(p)
-        
-        # Fallback: If map failed, just use the City, State, Zip (the last 2 unique parts)
-        if fallback and len(unique_parts) >= 2:
-            return ", ".join(unique_parts[-2:])
-        
+            if p not in unique_parts: unique_parts.append(p)
+            
+        if level == 1 and len(unique_parts) > 2:
+            return ", ".join(unique_parts[-3:]) # Street, City, State
+        if level == 2 and len(unique_parts) >= 2:
+            return ", ".join(unique_parts[-2:]) # City, State only
         return ", ".join(unique_parts)
 
-    async def get_coords(addr, client):
-        url = f"[https://nominatim.openstreetmap.org/search?q=](https://nominatim.openstreetmap.org/search?q=){addr}&format=json&limit=1"
-        r = await client.get(url, headers={"User-Agent": "LazyBot_Logistics/2.0"}, timeout=15)
-        if r.status_code == 200 and r.json():
-            return r.json()[0]["lat"], r.json()[0]["lon"]
+    async def fetch_coords(addr, client):
+        url = f"https://nominatim.openstreetmap.org/search?q={addr}&format=json&limit=1"
+        try:
+            r = await client.get(url, headers={"User-Agent": "LazyBot_Logistics/2.0"}, timeout=10)
+            if r.status_code == 200 and r.json():
+                return r.json()[0]["lat"], r.json()[0]["lon"]
+        except:
+            pass
         return None
 
-    try:
-        async with httpx.AsyncClient() as client:
-            # Try 1: Full Address
-            o_coords = await get_coords(clean_for_map(origin), client)
-            d_coords = await get_coords(clean_for_map(destination), client)
+    async with httpx.AsyncClient() as client:
+        o_coords = d_coords = None
+        # Try levels 0, 1, and 2 for both origin and destination
+        for level in range(3):
+            if not o_coords: o_coords = await fetch_coords(clean_addr(origin, level), client)
+            if not d_coords: d_coords = await fetch_coords(clean_addr(destination, level), client)
+            if o_coords and d_coords: break
 
-            # Try 2: Fallback to City/State if full address fails
-            if not o_coords: o_coords = await get_coords(clean_for_map(origin, fallback=True), client)
-            if not d_coords: d_coords = await get_coords(clean_for_map(destination, fallback=True), client)
-
-            if o_coords and d_coords:
-                osrm_url = f"[http://router.project-osrm.org/route/v1/driving/](http://router.project-osrm.org/route/v1/driving/){o_coords[1]},{o_coords[0]};{d_coords[1]},{d_coords[0]}?overview=false"
+        if o_coords and d_coords:
+            try:
+                osrm_url = f"http://router.project-osrm.org/route/v1/driving/{o_coords[1]},{o_coords[0]};{d_coords[1]},{d_coords[0]}?overview=false"
                 res = await client.get(osrm_url, timeout=10)
                 if res.status_code == 200:
                     meters = res.json()["routes"][0]["distance"]
                     return str(round(meters * 0.000621371, 1))
-    except Exception as e:
-        logger.error(f"OSRM Error: {e}")
+            except Exception as e:
+                logger.error(f"OSRM Route Error: {e}")
+                
     return "N/A"
 
 async def deepseek_ai_extract(text: str) -> dict:
