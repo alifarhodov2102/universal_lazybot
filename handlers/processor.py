@@ -5,7 +5,7 @@ import random
 import logging
 from datetime import date, datetime
 from aiogram import Router, types, F, Bot
-from sqlalchemy import select, update
+from sqlalchemy import select, text
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.enums import ParseMode
 from aiogram.fsm.context import FSMContext
@@ -29,15 +29,16 @@ media_group_tracker: dict[str, int] = {}
 async def check_and_update_limit(uid: int) -> tuple[bool, int, str]:
     """Alice checks the user's soul and returns (IsAllowed, LeftCount, TemplateText) 💅"""
     async with AsyncSessionLocal() as session:
-        # Force fresh data to see the LATEST Pro status immediately
-        session.expire_all()
+        # 🟢 CRITICAL: Force a COMMIT to clear the transaction cache
+        # This fixes the issue where the bot doesn't see Pro updates from other sessions.
+        await session.execute(text("COMMIT"))
         
         stmt = select(User).where(User.tg_id == uid)
         res = await session.execute(stmt)
         user = res.scalar_one_or_none()
         
         if not user:
-            return False, 0, None
+            return False, 0, ""
             
         # 1. Status Logic
         is_admin = uid in ADMIN_IDS
@@ -49,10 +50,10 @@ async def check_and_update_limit(uid: int) -> tuple[bool, int, str]:
             if user.expiry_date is None or user.expiry_date > current_time:
                 is_pro_active = True
         
-        # We fetch the template NOW while the session is open
-        user_template = user.template_text
+        # Pre-capture template as a string to avoid lazy-loading issues
+        user_template = str(user.template_text or "")
         
-        logger.info(f"User {uid} check: Admin={is_admin}, Pro={is_pro_active}, Used={user.daily_requests}")
+        logger.info(f"🔍 [DB CHECK] UID: {uid} | Pro: {is_pro_active} | Admin: {is_admin}")
 
         if is_admin or is_pro_active:
             return True, 999, user_template
@@ -63,7 +64,6 @@ async def check_and_update_limit(uid: int) -> tuple[bool, int, str]:
             user.daily_requests = 0
             user.last_request_date = today
             await session.commit()
-            await session.refresh(user)
         
         if user.daily_requests >= 10:
             return False, 0, user_template
@@ -82,9 +82,6 @@ async def safe_edit_status(bot: Bot, chat_id: int, message_id: int, new_text: st
             message_id=message_id,
             parse_mode=ParseMode.HTML
         )
-    except TelegramBadRequest as e:
-        if "message is not modified" in str(e).lower():
-            return None
     except Exception:
         pass
     return None
@@ -112,20 +109,13 @@ async def process_user_queue(uid: int, bot: Bot, template: str):
                     tmp.write(raw.read())
                     tmp_path = tmp.name
 
-                await safe_edit_status(bot, chat_id, status_msg_id, "🔍 <b>Reading tiny text...</b> [45%]")
+                await safe_edit_status(bot, chat_id, status_msg_id, "🔍 <b>Reading PDF...</b> [45%]")
                 text = await extract_text_async(tmp_path)
                 
-                ai_task = asyncio.create_task(smart_extract(text))
-                percent = 50
-                while not ai_task.done():
-                    if percent < 95:
-                        percent += 5
-                        await safe_edit_status(bot, chat_id, status_msg_id, f"🧠 <b>Thinking...</b> [{percent}%]")
-                    await asyncio.sleep(1.2)
+                # DeepSeek AI Logic
+                data = await smart_extract(text)
                 
-                data = await ai_task
-                
-                # Render using the template we grabbed at the start of the handle_pdf
+                # Render using the template we grabbed at the start
                 formatted_output = render_result(data, template)
                 
                 await bot.send_message(
@@ -136,8 +126,8 @@ async def process_user_queue(uid: int, bot: Bot, template: str):
                 )
 
             except Exception as e:
-                logger.error(f"Worker Error for {uid}: {e}")
-                await bot.send_message(chat_id, f"🙄 <b>Error:</b>\n<code>{str(e)}</code>", reply_to_message_id=reply_to_id)
+                logger.error(f"❌ Worker Error for {uid}: {e}")
+                await bot.send_message(chat_id, f"🙄 <b>Error:</b> <code>{e}</code>", reply_to_message_id=reply_to_id)
             
             finally:
                 try: await bot.delete_message(chat_id, status_msg_id)
@@ -153,7 +143,7 @@ async def handle_pdf(message: types.Message, bot: Bot):
     uid = message.from_user.id
     mg_id = message.media_group_id
 
-    # 1. Fetch ALL data from DB at once (Permissions + Template)
+    # 1. Fetch permissions and template
     allowed, left, template = await check_and_update_limit(uid)
     if not allowed:
         return await message.answer(
@@ -171,7 +161,7 @@ async def handle_pdf(message: types.Message, bot: Bot):
                 await message.reply("💅 <b>Honey, stop!</b> My limit is 5 PDFs. Ignoring the rest.")
             return
 
-    # 3. Add to User Queue
+    # 3. Queue Notification
     if uid not in user_queues:
         user_queues[uid] = asyncio.Queue()
     
@@ -180,7 +170,7 @@ async def handle_pdf(message: types.Message, bot: Bot):
     
     status_text = f"👀 <b>I woke up...</b> ({left_text})"
     if q_pos > 0:
-        status_text += f"\n📥 <i>Position in queue: {q_pos + 1}</i>"
+        status_text += f"\n📥 <i>Position: {q_pos + 1}</i>"
         
     initial_msg = await message.reply(status_text)
 
@@ -191,13 +181,12 @@ async def handle_pdf(message: types.Message, bot: Bot):
         "reply_to_id": message.message_id 
     })
 
-    # 4. Start Worker (Passing the template directly to avoid DB connection errors)
+    # 4. Start Worker
     if uid not in user_workers or user_workers[uid].done():
         user_workers[uid] = asyncio.create_task(process_user_queue(uid, bot, template))
 
 @router.message(Command("check_user"))
 async def admin_check_user(message: types.Message):
-    """Admin command to check user status 🧐"""
     if message.from_user.id not in ADMIN_IDS: return
     args = message.text.split()
     if len(args) < 2: return await message.answer("Usage: <code>/check_user [tg_id]</code>")
