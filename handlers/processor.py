@@ -1,16 +1,13 @@
 import os
 import tempfile
 import asyncio
-import random
 import logging
 from datetime import date, datetime
 from typing import Dict, Any, Callable, Awaitable, Optional
 
 from aiogram import Router, types, F, Bot
-from aiogram.enums import ParseMode, ChatType
+from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
-from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
 from sqlalchemy import select
 
 from config import ADMIN_IDS
@@ -27,16 +24,13 @@ router = Router()
 # ================= GLOBALS =================
 user_queues: Dict[int, asyncio.Queue] = {}
 user_workers: Dict[int, asyncio.Task] = {}
-media_group_tracker: Dict[str, int] = {}  # ✅ REQUIRED by main.py
+media_group_tracker: Dict[str, int] = {}  # required by main.py
 
 MEDIA_GROUP_LIMIT = 5
 FREE_DAILY_LIMIT = 10
 
-# Limit heavy OCR/AI so 8+ PDFs won't crash the container
-GLOBAL_PROCESS_SEM = asyncio.Semaphore(2)
-
-# Limit outgoing Telegram API calls (prevents flood crashes)
-TG_SEND_SEM = asyncio.Semaphore(1)
+GLOBAL_PROCESS_SEM = asyncio.Semaphore(2)  # limit heavy OCR/AI
+TG_SEND_SEM = asyncio.Semaphore(1)         # limit Telegram send/edit/delete calls
 
 
 # ================= TELEGRAM SAFE CALL =================
@@ -64,7 +58,7 @@ async def tg_call_with_retry(
 
 
 async def safe_send(bot: Bot, **kwargs):
-    return await tg_call_with_retry(lambda: bot.send_message(**kwargs), max_retries=6)
+    return await tg_call_with_retry(lambda: bot.send_message(**kwargs))
 
 
 async def safe_edit(bot: Bot, chat_id: int, message_id: int, text: str):
@@ -77,7 +71,7 @@ async def safe_edit(bot: Bot, chat_id: int, message_id: int, text: str):
         )
 
     try:
-        return await tg_call_with_retry(_call, max_retries=6)
+        return await tg_call_with_retry(_call)
     except TelegramBadRequest as e:
         if "message is not modified" in str(e).lower():
             return None
@@ -87,8 +81,7 @@ async def safe_edit(bot: Bot, chat_id: int, message_id: int, text: str):
 async def safe_delete(bot: Bot, chat_id: int, message_id: int):
     try:
         return await tg_call_with_retry(
-            lambda: bot.delete_message(chat_id=chat_id, message_id=message_id),
-            max_retries=6,
+            lambda: bot.delete_message(chat_id=chat_id, message_id=message_id)
         )
     except Exception:
         return None
@@ -98,7 +91,7 @@ async def safe_delete(bot: Bot, chat_id: int, message_id: int):
 async def check_and_update_limit(uid: int) -> tuple[bool, int]:
     """
     Returns: (allowed, left)
-      left = 999 for unlimited
+    left = 999 for unlimited
     """
     async with AsyncSessionLocal() as session:
         res = await session.execute(select(User).where(User.tg_id == uid))
@@ -230,7 +223,7 @@ async def handle_pdf(message: types.Message, bot: Bot):
     if not allowed:
         return await message.answer("💸 Daily limit reached. Use /plans.", parse_mode=ParseMode.HTML)
 
-    # Keep your previous "5 PDF at once" protection
+    # Limit “send many at once” in media groups
     if mg_id:
         media_group_tracker[mg_id] = media_group_tracker.get(mg_id, 0) + 1
         if media_group_tracker[mg_id] > MEDIA_GROUP_LIMIT:
@@ -263,31 +256,3 @@ async def handle_pdf(message: types.Message, bot: Bot):
 async def _cleanup_media_group(mg_id: str):
     await asyncio.sleep(120)
     media_group_tracker.pop(mg_id, None)
-
-
-# ================= GROUP TEXT BEHAVIOR =================
-@router.message(F.text & ~F.text.startswith("/"))
-async def sassy_chat(message: types.Message, bot: Bot):
-    """
-    If you use handlers/chat.py for real conversation:
-    - In PRIVATE this handler is basically unused because chat router is included before processor.
-    - In GROUP it will only answer when tagged/replied-to (safe).
-    """
-    if message.chat.type == ChatType.PRIVATE:
-        return  # Let handlers/chat.py handle private chat
-
-    me = await bot.get_me()
-    username = (me.username or "").lower()
-    text = (message.text or "").lower()
-
-    is_mentioned = bool(username) and f"@{username}" in text
-    is_reply_to_bot = (
-        message.reply_to_message is not None
-        and message.reply_to_message.from_user is not None
-        and message.reply_to_message.from_user.id == me.id
-    )
-
-    if is_mentioned or is_reply_to_bot:
-        return await message.reply("💅 Tag me and talk, honey.", parse_mode=ParseMode.HTML)
-
-    return

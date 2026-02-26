@@ -1,10 +1,13 @@
 import time
 import logging
+import asyncio
+import html
 import httpx
 
 from aiogram import Router, types, F, Bot
-from aiogram.enums import ChatType, ParseMode
+from aiogram.enums import ChatType
 from aiogram.exceptions import TelegramRetryAfter
+
 from config import DEEPSEEK_API_KEY, DEEPSEEK_URL
 
 router = Router()
@@ -30,20 +33,19 @@ def _cooldown_ok(user_id: int, seconds: int) -> bool:
 
 
 def _alice_system_prompt() -> str:
-    # Keep it short (saves tokens) but consistent character
     return (
         "You are Lazy Alice, a sassy but helpful girl assistant in a Telegram bot. "
-        "You reply in the SAME language as the user (English/Russian/Uzbek). "
+        "Reply in the SAME language as the user (English/Russian/Uzbek). "
         "Keep answers concise (1-6 short lines). "
-        "Tone: playful, a bit sarcastic, never rude or hateful. "
-        "If user asks about PDFs/Rate Confirmations, remind them to send a PDF. "
-        "No emojis spam: max 2 emojis."
+        "Playful, slightly sarcastic, never hateful. "
+        "If user asks about PDFs/Rate Confirmations, tell them to send a PDF. "
+        "Max 2 emojis."
     )
 
 
 async def deepseek_chat(user_text: str) -> str:
     if not DEEPSEEK_API_KEY:
-        return "🙄 AI is offline. Send a PDF or try later."
+        return "🙄 AI is offline right now. Try later."
 
     payload = {
         "model": "deepseek-chat",
@@ -58,7 +60,10 @@ async def deepseek_chat(user_text: str) -> str:
     async with httpx.AsyncClient() as client:
         r = await client.post(
             DEEPSEEK_URL,
-            headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"},
+            headers={
+                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                "Content-Type": "application/json",
+            },
             json=payload,
             timeout=30.0,
         )
@@ -67,53 +72,85 @@ async def deepseek_chat(user_text: str) -> str:
         return (data["choices"][0]["message"]["content"] or "").strip() or "🥱"
 
 
-async def _should_answer_in_group(message: types.Message, bot: Bot) -> bool:
+async def _should_answer_in_group(message: types.Message, bot: Bot) -> tuple[bool, str]:
+    """
+    Returns: (should_answer, cleaned_text)
+    - should_answer: tagged or replied to bot
+    - cleaned_text: @bot removed if present
+    """
     me = await bot.get_me()
     username = (me.username or "").lower()
 
-    text = (message.text or "").lower()
-    is_mentioned = bool(username) and (f"@{username}" in text)
+    text = message.text or ""
+    text_lower = text.lower()
 
+    is_mentioned = bool(username) and (f"@{username}" in text_lower)
     is_reply_to_bot = (
         message.reply_to_message is not None
         and message.reply_to_message.from_user is not None
         and message.reply_to_message.from_user.id == me.id
     )
 
-    return is_mentioned or is_reply_to_bot
+    if not (is_mentioned or is_reply_to_bot):
+        return False, ""
+
+    # Strip mention from prompt so AI sees the real question
+    if username:
+        cleaned = text.replace(f"@{me.username}", "").strip()
+    else:
+        cleaned = text.strip()
+
+    # If user only tagged without text, give a default prompt
+    if not cleaned:
+        cleaned = "Hi Alice."
+
+    return True, cleaned
+
+
+async def _send_with_retry(message: types.Message, text: str):
+    """
+    Avoid Telegram HTML parse issues: escape AI output.
+    """
+    safe_text = html.escape(text)
+
+    for _ in range(5):
+        try:
+            return await message.reply(safe_text)  # plain text, safe
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(int(e.retry_after) + 1)
+    return await message.reply(safe_text)
 
 
 @router.message(F.text & ~F.text.startswith("/"))
 async def alice_chat(message: types.Message, bot: Bot):
-    # Ignore service messages / empty text
     if not message.text:
         return
 
-    # If user posted a link or huge text, still ok but keep it short
     user_id = message.from_user.id
 
     # GROUPS: answer only when tagged / replied-to
     if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
-        if not await _should_answer_in_group(message, bot):
+        should_answer, cleaned_text = await _should_answer_in_group(message, bot)
+        if not should_answer:
             return
 
         if not _cooldown_ok(user_id, GROUP_COOLDOWN_SECONDS):
             return
 
+        prompt = cleaned_text
+
     # PRIVATE: answer normally
     elif message.chat.type == ChatType.PRIVATE:
         if not _cooldown_ok(user_id, PRIVATE_COOLDOWN_SECONDS):
             return
+        prompt = message.text.strip()
 
-    # OTHER chat types: ignore
     else:
         return
 
     try:
-        reply = await deepseek_chat(message.text)
-        await message.reply(reply, parse_mode=ParseMode.HTML)
-    except TelegramRetryAfter as e:
-        await message.answer(f"⏳ Flood control. Wait {e.retry_after}s.")
-    except Exception as e:
+        reply = await deepseek_chat(prompt)
+        await _send_with_retry(message, reply)
+    except Exception:
         logger.exception("Chat error")
-        await message.reply("😵‍💫 I’m lagging. Try again in a bit.")
+        await _send_with_retry(message, "😵‍💫 I’m lagging. Try again in a bit.")
