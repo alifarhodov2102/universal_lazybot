@@ -6,7 +6,8 @@ from datetime import datetime
 
 from database.connection import AsyncSessionLocal
 from database.models import User
-from config import ADMIN_IDS 
+from config import ADMIN_IDS
+
 
 class SubscriptionMiddleware(BaseMiddleware):
     async def __call__(
@@ -22,7 +23,7 @@ class SubscriptionMiddleware(BaseMiddleware):
         # 2. PDF Filter: Alice only starts working for PDFs 🥱
         if event.document and event.document.mime_type == "application/pdf":
             user_id = event.from_user.id
-            
+
             # Admin VIP access: No DB wait for the boss 💅
             if user_id in ADMIN_IDS:
                 return await handler(event, data)
@@ -42,16 +43,17 @@ class SubscriptionMiddleware(BaseMiddleware):
                                 await session.commit()
                                 # Notify the user briefly if you want
                                 await event.answer("🚫 Your Pro plan expired, honey. Back to free limits! 💅")
-                        
+
                         # Pass the user object to the handler to avoid another DB call
                         data["db_user"] = user
                 except Exception as e:
                     print(f"❌ Alice's Memory Error: {e}")
-                
+
         return await handler(event, data)
 
+
 class ThrottlingMiddleware(BaseMiddleware):
-    def __init__(self, limit: float = 1.0): 
+    def __init__(self, limit: float = 1.0):
         self.limit = limit
         self.caches = {}
         super().__init__()
@@ -63,18 +65,22 @@ class ThrottlingMiddleware(BaseMiddleware):
         data: Dict[str, Any]
     ) -> Any:
         user_id = event.from_user.id
-        
+
         # Admins can spam Alice all they want 💅
         if user_id in ADMIN_IDS:
             return await handler(event, data)
 
+        # ✅ Allow PDFs to bypass throttling (queue will handle them)
+        if event.document and event.document.mime_type == "application/pdf":
+            return await handler(event, data)
+
         current_time = datetime.now().timestamp()
-        
+
         # Anti-Spam Check: Don't let them annoy Alice too fast
         if user_id in self.caches:
             if current_time - self.caches[user_id] < self.limit:
                 # Alice ignores the request silently 🥱
-                return 
-        
+                return
+
         self.caches[user_id] = current_time
         return await handler(event, data)
