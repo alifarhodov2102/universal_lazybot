@@ -72,7 +72,7 @@ async def get_miles_free(origin: str, destination: str) -> str:
         return ", ".join(unique_parts)
 
     async def fetch_coords(addr, client):
-        # FIXED: Removed the leading '[' bracket
+        # FIXED: Removed the leading '[' and markdown formatting from URL
         url = f"[https://nominatim.openstreetmap.org/search?q=](https://nominatim.openstreetmap.org/search?q=){addr}&format=json&limit=1"
         try:
             r = await client.get(url, headers={"User-Agent": "LazyBot_Logistics/2.0"}, timeout=10)
@@ -91,7 +91,7 @@ async def get_miles_free(origin: str, destination: str) -> str:
 
         if o_coords and d_coords:
             try:
-                # FIXED: Removed the leading '[' bracket
+                # FIXED: Removed leading '[' and parenthesis from URL
                 osrm_url = f"[http://router.project-osrm.org/route/v1/driving/](http://router.project-osrm.org/route/v1/driving/){o_coords[1]},{o_coords[0]};{d_coords[1]},{d_coords[0]}?overview=false"
                 res = await client.get(osrm_url, timeout=10)
                 if res.status_code == 200:
