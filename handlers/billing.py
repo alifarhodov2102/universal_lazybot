@@ -13,15 +13,16 @@ router = Router()
 @router.message(Command("plans"))
 async def show_plans(message: types.Message):
     """Alice presents the toll for her services 💅"""
-    # 1. Info message with updated pricing (59,000 UZS)
+    # 1. Info message with updated pricing ($5)
     plan_details = (
         "✨ <b>Alice's Premium Access</b> ✨\n\n"
-        "💰 <b>Price:</b> 250 Stars OR <b>59,000 UZS</b> / month\n\n"
+        "💰 <b>Price:</b> 250 Stars OR <b>$5</b> / month\n\n"
         "✅ <b>Unlimited</b> daily RC extractions\n"
         "✅ AI-Learned Custom Templates\n"
         "✅ Full OCR & Priority AI processing\n\n"
-        "💳 <b>Manual Card Payment:</b>\n"
-        "<code>5614682203258662</code> (Click to copy)\n\n"
+        "💳 <b>Manual Card Payment (Visa):</b>\n"
+        "<code>4231200092181873</code> (Click to copy)\n\n"
+        "👤 <b>Name:</b> Ali Farhodov\n\n"
         "⚠️ <i>Send the receipt to @lazyalice_admin after paying for manual activation.</i>"
     )
     
