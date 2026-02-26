@@ -1,16 +1,13 @@
 import os
 import tempfile
 import asyncio
-import random
 import logging
 from datetime import date, datetime
-from typing import Dict, Any, Callable, Awaitable, Optional
+from typing import Dict, Any, Callable, Awaitable
 
 from aiogram import Router, types, F, Bot
 from aiogram.enums import ParseMode, ChatType
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
-from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
 from sqlalchemy import select
 
 from config import ADMIN_IDS
@@ -27,54 +24,71 @@ router = Router()
 # ================= GLOBALS =================
 user_queues: Dict[int, asyncio.Queue] = {}
 user_workers: Dict[int, asyncio.Task] = {}
-media_group_tracker: Dict[str, int] = {}
 
 MEDIA_GROUP_LIMIT = 5
 FREE_DAILY_LIMIT = 10
 
-GLOBAL_PROCESS_SEM = asyncio.Semaphore(2)  # limit heavy OCR/AI
-TG_SEND_SEM = asyncio.Semaphore(1)         # limit telegram sends
+# Limit heavy OCR/AI so 8+ PDFs won't crash the container
+GLOBAL_PROCESS_SEM = asyncio.Semaphore(2)
+
+# Limit outgoing Telegram API calls (prevents flood crashes)
+TG_SEND_SEM = asyncio.Semaphore(1)
 
 
-# ================= TELEGRAM SAFE CALL =================
+# ================= TELEGRAM SAFE CALLS =================
 async def tg_call_with_retry(
     factory: Callable[[], Awaitable[Any]],
     *,
-    max_retries: int = 5,
+    max_retries: int = 6,
 ) -> Any:
+    """
+    Retries Telegram calls on flood control (TelegramRetryAfter).
+    """
+    last_exc: Exception | None = None
+
     for _ in range(max_retries):
         try:
             async with TG_SEND_SEM:
                 return await factory()
         except TelegramRetryAfter as e:
-            await asyncio.sleep(int(e.retry_after) + 1)
-        except Exception:
+            last_exc = e
+            await asyncio.sleep(int(getattr(e, "retry_after", 1)) + 1)
+        except Exception as e:
+            last_exc = e
             await asyncio.sleep(1)
+
+    if last_exc:
+        raise last_exc
     return await factory()
 
 
 async def safe_send(bot: Bot, **kwargs):
-    return await tg_call_with_retry(lambda: bot.send_message(**kwargs))
+    return await tg_call_with_retry(lambda: bot.send_message(**kwargs), max_retries=6)
 
 
 async def safe_edit(bot: Bot, chat_id: int, message_id: int, text: str):
-    try:
-        return await tg_call_with_retry(
-            lambda: bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=text,
-                parse_mode=ParseMode.HTML,
-            )
+    async def _call():
+        return await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
         )
-    except TelegramBadRequest:
+
+    try:
+        return await tg_call_with_retry(_call, max_retries=6)
+    except TelegramBadRequest as e:
+        # Ignore harmless "message is not modified"
+        if "message is not modified" in str(e).lower():
+            return None
         return None
 
 
 async def safe_delete(bot: Bot, chat_id: int, message_id: int):
     try:
         return await tg_call_with_retry(
-            lambda: bot.delete_message(chat_id=chat_id, message_id=message_id)
+            lambda: bot.delete_message(chat_id=chat_id, message_id=message_id),
+            max_retries=6,
         )
     except Exception:
         return None
@@ -82,6 +96,10 @@ async def safe_delete(bot: Bot, chat_id: int, message_id: int):
 
 # ================= LIMIT CHECK =================
 async def check_and_update_limit(uid: int) -> tuple[bool, int]:
+    """
+    Returns: (allowed, left)
+      left = 999 for unlimited
+    """
     async with AsyncSessionLocal() as session:
         res = await session.execute(select(User).where(User.tg_id == uid))
         user = res.scalar_one_or_none()
@@ -91,6 +109,7 @@ async def check_and_update_limit(uid: int) -> tuple[bool, int]:
         is_admin = uid in ADMIN_IDS
         now = datetime.utcnow()
 
+        # Pro active?
         is_pro_active = False
         if user.is_pro:
             expiry = user.expiry_date
@@ -115,7 +134,7 @@ async def check_and_update_limit(uid: int) -> tuple[bool, int]:
 
         user.daily_requests += 1
         await session.commit()
-        return True, FREE_DAILY_LIMIT - user.daily_requests
+        return True, max(0, FREE_DAILY_LIMIT - user.daily_requests)
 
 
 # ================= WORKER =================
@@ -124,7 +143,7 @@ async def process_user_queue(uid: int, bot: Bot):
     if not q:
         return
 
-    logger.info("Worker started for %s", uid)
+    logger.info("🚀 Worker started for %s", uid)
 
     try:
         while True:
@@ -135,12 +154,11 @@ async def process_user_queue(uid: int, bot: Bot):
                     break
                 continue
 
-            chat_id = item["chat_id"]
-            file_id = item["file_id"]
-            status_id = item["status_msg_id"]
-            reply_id = item["reply_to_id"]
-
-            tmp_path = None
+            chat_id: int = item["chat_id"]
+            file_id: str = item["file_id"]
+            status_id: int = item["status_msg_id"]
+            reply_id: int = item["reply_to_id"]
+            tmp_path: str | None = None
 
             try:
                 await safe_edit(bot, chat_id, status_id, "📄 <b>Downloading...</b>")
@@ -159,6 +177,7 @@ async def process_user_queue(uid: int, bot: Bot):
                     await safe_edit(bot, chat_id, status_id, "🧠 <b>Analyzing...</b>")
                     data = await smart_extract(text)
 
+                # Get user's custom template if exists
                 async with AsyncSessionLocal() as session:
                     res = await session.execute(select(User).where(User.tg_id == uid))
                     user = res.scalar_one_or_none()
@@ -175,48 +194,57 @@ async def process_user_queue(uid: int, bot: Bot):
                 )
 
             except Exception as e:
-                logger.exception("Worker error")
-                await safe_send(
-                    bot,
-                    chat_id=chat_id,
-                    text=f"⚠️ <b>Error:</b>\n<code>{str(e)}</code>",
-                    reply_to_message_id=reply_id,
-                    parse_mode=ParseMode.HTML,
-                )
+                logger.exception("Worker error for %s", uid)
+                try:
+                    await safe_send(
+                        bot,
+                        chat_id=chat_id,
+                        text=f"⚠️ <b>Error:</b>\n<code>{str(e)}</code>",
+                        reply_to_message_id=reply_id,
+                        parse_mode=ParseMode.HTML,
+                    )
+                except Exception:
+                    pass
 
             finally:
                 await safe_delete(bot, chat_id, status_id)
+
                 if tmp_path and os.path.exists(tmp_path):
-                    os.remove(tmp_path)
+                    try:
+                        os.remove(tmp_path)
+                    except Exception:
+                        pass
+
                 q.task_done()
 
     finally:
         user_workers.pop(uid, None)
-        logger.info("Worker stopped for %s", uid)
+        logger.info("💤 Worker stopped for %s", uid)
 
 
 # ================= PDF HANDLER =================
 @router.message(F.document.mime_type == "application/pdf")
 async def handle_pdf(message: types.Message, bot: Bot):
     uid = message.from_user.id
-    allowed, left = await check_and_update_limit(uid)
 
+    allowed, left = await check_and_update_limit(uid)
     if not allowed:
-        return await message.answer("💸 Daily limit reached. Use /plans.")
+        return await message.answer("💸 Daily limit reached. Use /plans.", parse_mode=ParseMode.HTML)
 
     user_queues.setdefault(uid, asyncio.Queue())
     pos = user_queues[uid].qsize()
 
-    msg = await message.reply(
-        f"👀 Processing... ({'Unlimited' if left==999 else f'{left} left'})"
-        + (f"\n📥 Queue position: {pos+1}" if pos > 0 else ""),
-        parse_mode=ParseMode.HTML
-    )
+    left_text = "Unlimited" if left == 999 else f"{left} left"
+    status_text = f"👀 <b>Queued</b> ({left_text})"
+    if pos > 0:
+        status_text += f"\n📥 <i>Queue position: {pos + 1}</i>"
+
+    status_msg = await message.reply(status_text, parse_mode=ParseMode.HTML)
 
     await user_queues[uid].put({
         "chat_id": message.chat.id,
         "file_id": message.document.file_id,
-        "status_msg_id": msg.message_id,
+        "status_msg_id": status_msg.message_id,
         "reply_to_id": message.message_id,
     })
 
@@ -224,27 +252,29 @@ async def handle_pdf(message: types.Message, bot: Bot):
         user_workers[uid] = asyncio.create_task(process_user_queue(uid, bot))
 
 
-# ================= SASSY CHAT =================
+# ================= GROUP TEXT BEHAVIOR =================
 @router.message(F.text & ~F.text.startswith("/"))
-async def sassy_chat(message: types.Message, state: FSMContext, bot: Bot):
-    if await state.get_state():
-        return
-
+async def sassy_chat(message: types.Message, bot: Bot):
+    """
+    - Private: reply short (PDF reminder) OR you can remove this handler if you add handlers/chat.py
+    - Group: reply ONLY if mentioned or replied-to
+    """
     if message.chat.type == ChatType.PRIVATE:
         return await message.reply("🥱 Send a PDF.", parse_mode=ParseMode.HTML)
 
-    # In groups: only reply if mentioned or replied to
     me = await bot.get_me()
     username = (me.username or "").lower()
 
     text = (message.text or "").lower()
-    mentioned = username and f"@{username}" in text
+    is_mentioned = bool(username) and f"@{username}" in text
 
-    replied = (
-        message.reply_to_message
-        and message.reply_to_message.from_user
+    is_reply_to_bot = (
+        message.reply_to_message is not None
+        and message.reply_to_message.from_user is not None
         and message.reply_to_message.from_user.id == me.id
     )
 
-    if mentioned or replied:
+    if is_mentioned or is_reply_to_bot:
         return await message.reply("💅 Send a PDF.", parse_mode=ParseMode.HTML)
+
+    return

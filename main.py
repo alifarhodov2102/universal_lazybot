@@ -9,6 +9,7 @@ from aiogram.client.default import DefaultBotProperties
 from sqlalchemy import text
 
 from config import BOT_TOKEN
+from handlers import chat
 from database.connection import init_db, AsyncSessionLocal
 from handlers import start, settings, billing, processor, admin
 from utils.middlewares import SubscriptionMiddleware, ThrottlingMiddleware
@@ -105,6 +106,7 @@ async def main():
     dp.include_router(start.router)
     dp.include_router(settings.router)
     dp.include_router(billing.router)
+    dp.include_router(chat.router)
     dp.include_router(processor.router)
 
     # 6. Start Polling
