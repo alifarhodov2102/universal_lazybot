@@ -58,9 +58,7 @@ async def get_miles_free(origin: str, destination: str) -> str:
     if not origin or not destination: return "N/A"
     
     def clean_addr(addr, level=0):
-        # Level 0: Full cleaned address
-        # Level 1: Street, City, State
-        # Level 2: City, State only (Last resort)
+        # Clean facility prefixes and duplicate noise
         addr = re.sub(r'^(?:FMC|JASPER|ARMSTRONG|PLANT \d+|DC|RESUPPLY|FPDC|WAREHOUSE|LOGISTICS|NAME:|ADDRESS:)\s+', '', addr, flags=re.I)
         parts = [p.strip() for p in addr.replace('\n', ',').split(",") if p.strip()]
         unique_parts = []
@@ -74,7 +72,7 @@ async def get_miles_free(origin: str, destination: str) -> str:
         return ", ".join(unique_parts)
 
     async def fetch_coords(addr, client):
-        url = f"https://nominatim.openstreetmap.org/search?q={addr}&format=json&limit=1"
+        url = f"[https://nominatim.openstreetmap.org/search?q=](https://nominatim.openstreetmap.org/search?q=){addr}&format=json&limit=1"
         try:
             r = await client.get(url, headers={"User-Agent": "LazyBot_Logistics/2.0"}, timeout=10)
             if r.status_code == 200 and r.json():
@@ -85,7 +83,6 @@ async def get_miles_free(origin: str, destination: str) -> str:
 
     async with httpx.AsyncClient() as client:
         o_coords = d_coords = None
-        # Try levels 0, 1, and 2 for both origin and destination
         for level in range(3):
             if not o_coords: o_coords = await fetch_coords(clean_addr(origin, level), client)
             if not d_coords: d_coords = await fetch_coords(clean_addr(destination, level), client)
@@ -93,7 +90,7 @@ async def get_miles_free(origin: str, destination: str) -> str:
 
         if o_coords and d_coords:
             try:
-                osrm_url = f"http://router.project-osrm.org/route/v1/driving/{o_coords[1]},{o_coords[0]};{d_coords[1]},{d_coords[0]}?overview=false"
+                osrm_url = f"[http://router.project-osrm.org/route/v1/driving/](http://router.project-osrm.org/route/v1/driving/){o_coords[1]},{o_coords[0]};{d_coords[1]},{d_coords[0]}?overview=false"
                 res = await client.get(osrm_url, timeout=10)
                 if res.status_code == 200:
                     meters = res.json()["routes"][0]["distance"]
@@ -151,13 +148,14 @@ TEXT:
             return None
 
 async def smart_extract(text: str) -> dict:
-    logger.info("Starting Multi-Stop Extraction Pipeline... 💅")
+    logger.info("Starting Multi-Stop Cumulative Extraction Pipeline... 💅")
     
     data = await deepseek_ai_extract(text)
     
     if not data:
-        data = {"broker": "N/A", "load_number": "", "rate": "", "total_miles": ""}
+        data = {"broker": "N/A", "load_number": "", "rate": "", "total_miles": "N/A"}
 
+    # 1. Regex Overlays (Safety fallback for IDs and Rates)
     if load_match := LOAD_RE.search(text):
         if not data.get("load_number") or data["load_number"] == "ID":
             data["load_number"] = load_match.group(1)
@@ -166,15 +164,27 @@ async def smart_extract(text: str) -> dict:
         if not data.get("rate") or data["rate"] == "0.00":
             data["rate"] = rate_match.group(1)
 
-    if miles_match := MILES_RE.search(text):
-        if not data.get("total_miles") or data["total_miles"] == "0":
-            data["total_miles"] = miles_match.group(1)
-            
+    # 2. Mileage Logic: Cumulative for Multi-Stop
+    # If the PDF doesn't specify total miles, Alice calculates the route segment by segment
     if not data.get("total_miles") or str(data["total_miles"]) in ["", "N/A", "0"]:
         if data.get("pickups") and data.get("deliveries"):
-            origin = data["pickups"][0]["address"]
-            destination = data["deliveries"][-1]["address"] 
-            miles = await get_miles_free(origin, destination)
-            data["total_miles"] = miles
+            all_stops = data["pickups"] + data["deliveries"]
+            total_cumulative_miles = 0.0
+            valid_trip = False
+            
+            for i in range(len(all_stops) - 1):
+                seg_origin = all_stops[i]["address"]
+                seg_dest = all_stops[i+1]["address"]
+                
+                seg_miles = await get_miles_free(seg_origin, seg_dest)
+                
+                if seg_miles != "N/A":
+                    total_cumulative_miles += float(seg_miles)
+                    valid_trip = True
+            
+            if valid_trip:
+                data["total_miles"] = str(round(total_cumulative_miles, 1))
+            else:
+                data["total_miles"] = "N/A"
             
     return data
