@@ -2,12 +2,13 @@ import os
 import tempfile
 import asyncio
 import random
-from datetime import date
+from datetime import date, datetime
 from aiogram import Router, types, F, Bot
 from sqlalchemy import select, update
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.enums import ParseMode
 from aiogram.fsm.context import FSMContext
+from aiogram.filters import Command
 
 from database.connection import AsyncSessionLocal
 from database.models import User
@@ -21,11 +22,12 @@ router = Router()
 # Global trackers for queue management
 user_queues: dict[int, asyncio.Queue] = {}
 user_workers: dict[int, asyncio.Task] = {}
-media_group_tracker: dict[str, int] = {} # Tracks files per batch/media_group_id
+media_group_tracker: dict[str, int] = {} # Tracks files per batch
 
 async def check_and_update_limit(uid: int) -> tuple[bool, int]:
-    """Checks if a user has daily quota left. Resets daily if needed. 🥱💅"""
+    """Checks daily quota. Pro users and Admins are always allowed. 💅"""
     async with AsyncSessionLocal() as session:
+        # 1. Fetch the most fresh data from DB
         stmt = select(User).where(User.tg_id == uid)
         res = await session.execute(stmt)
         user = res.scalar_one_or_none()
@@ -33,9 +35,16 @@ async def check_and_update_limit(uid: int) -> tuple[bool, int]:
         if not user:
             return False, 0
             
+        # 2. Priority check: Admins and Pro users
         if uid in ADMIN_IDS or user.is_pro:
-            return True, 999
+            # Final safety check: if Pro expired, treat as free
+            if user.expiry_date and user.expiry_date < datetime.utcnow():
+                # Handled below in free user logic
+                pass
+            else:
+                return True, 999
 
+        # 3. Free user logic
         today = date.today()
         if user.last_request_date < today:
             user.daily_requests = 0
@@ -113,7 +122,6 @@ async def process_user_queue(uid: int, bot: Bot):
 
                 formatted_output = render_result(data, template)
                 
-                # IMPORTANT: Reply directly to the specific PDF message that was sent
                 await bot.send_message(
                     chat_id, 
                     formatted_output, 
@@ -142,25 +150,23 @@ async def handle_pdf(message: types.Message, bot: Bot):
     uid = message.from_user.id
     mg_id = message.media_group_id
 
-    # 1. Media Group Limit (Max 5 PDFs at once)
+    # 1. Check Limits First
+    allowed, left = await check_and_update_limit(uid)
+    if not allowed:
+        return await message.answer(
+            "💸 <b>Daily Limit Reached!</b>\n\nUpgrade to /plans now. 💅"
+        )
+
+    # 2. Media Group Limit (Max 5 PDFs at once)
     if mg_id:
         if mg_id not in media_group_tracker:
             media_group_tracker[mg_id] = 0
         media_group_tracker[mg_id] += 1
         
-        # If this is the 6th or higher file in the same batch, ignore it.
         if media_group_tracker[mg_id] > 5:
             if media_group_tracker[mg_id] == 6:
-                await message.reply("💅 <b>Honey, stop!</b> My limit is 5 PDFs per batch. I'm ignoring the rest.")
+                await message.reply("💅 <b>Honey, stop!</b> My limit is 5 PDFs. Ignoring the rest.")
             return
-
-    # 2. Daily Quota Check
-    allowed, left = await check_and_update_limit(uid)
-    if not allowed:
-        return await message.answer(
-            "💸 <b>Daily Limit Reached!</b>\n\nYou've used your 10 free RCs. "
-            "Wait until tomorrow or upgrade to /plans now. 💅"
-        )
 
     # 3. Add to User Queue
     if uid not in user_queues:
@@ -179,12 +185,39 @@ async def handle_pdf(message: types.Message, bot: Bot):
         "chat_id": message.chat.id, 
         "file_id": message.document.file_id,
         "status_msg_id": initial_msg.message_id,
-        "reply_to_id": message.message_id  # Save this to reply to the correct PDF later
+        "reply_to_id": message.message_id 
     })
 
-    # 4. Start Worker if not already active for this user
+    # 4. Start Worker
     if uid not in user_workers or user_workers[uid].done():
         user_workers[uid] = asyncio.create_task(process_user_queue(uid, bot))
+
+@router.message(Command("check_user"))
+async def admin_check_user(message: types.Message):
+    """Admin command to check user status 🧐"""
+    if message.from_user.id not in ADMIN_IDS: return
+
+    args = message.text.split()
+    if len(args) < 2:
+        return await message.answer("Usage: <code>/check_user [tg_id]</code>")
+
+    target_id = int(args[1])
+    async with AsyncSessionLocal() as session:
+        stmt = select(User).where(User.tg_id == target_id)
+        res = await session.execute(stmt)
+        user = res.scalar_one_or_none()
+
+    if not user:
+        return await message.answer("User not found in database.")
+
+    info = (
+        f"👤 <b>User Info:</b> {target_id}\n"
+        f"👑 <b>Is Pro:</b> {user.is_pro}\n"
+        f"📅 <b>Expiry:</b> {user.expiry_date}\n"
+        f"📈 <b>Daily Used:</b> {user.daily_requests}/10\n"
+        f"🕒 <b>Last Date:</b> {user.last_request_date}"
+    )
+    await message.answer(info)
 
 @router.message(F.text & ~F.text.startswith("/"))
 async def sassy_chat(message: types.Message, state: FSMContext):
