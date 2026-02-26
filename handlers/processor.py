@@ -212,5 +212,5 @@ async def admin_check_user(message: types.Message):
 @router.message(F.text & ~F.text.startswith("/"))
 async def sassy_chat(message: types.Message, state: FSMContext):
     if await state.get_state() is not None: return
-    responses = ["🙄 Send a PDF.", "💅 Only PDFs.", "🥱 Send the RC.", "🚫 Move along, honey."]
+    responses = ["🙄 Send a PDF.", "💅 Only PDFs.", "🥱 Send the RC."]
     await message.reply(random.choice(responses))
