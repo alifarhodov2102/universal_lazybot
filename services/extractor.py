@@ -51,8 +51,13 @@ def regex_extract(text: str) -> dict:
     data = {"broker": "", "load_number": "", "rate": "", "total_miles": ""}
     
     lines = [l.strip() for l in text.splitlines() if l.strip()]
-    if lines:
-        data["broker"] = " ".join(lines[:3])[:100]
+    
+    # Smarter Broker Logic: Skip lines that look like dates or PRO numbers
+    # This prevents the "Broker: PRO# 62055 Rate Confirmation..." bug
+    for line in lines[:5]:
+        if not re.search(r'\d{2}/\d{2}/\d{2}', line) and not re.search(r'PRO\s*#', line, re.I):
+            data["broker"] = line[:100]
+            break
 
     if load_match := LOAD_RE.search(text):
         data["load_number"] = load_match.group(1)
@@ -69,7 +74,7 @@ async def get_miles_free(origin: str, destination: str) -> str:
     """Alice calculates distance by stripping facility noise for OSRM 🗺️"""
     if not origin or not destination: return ""
     
-    # Clean facility names (FMC, Jasper, etc) so geocoding only sees the address
+    # Clean facility names so geocoding only sees the address
     clean_regex = r'^(?:FMC|JASPER|ARMSTRONG|PLANT \d+|DC|RESUPPLY|FPDC|WAREHOUSE|LOGISTICS)\s+'
     o_addr = re.sub(clean_regex, '', origin, flags=re.I).strip()
     d_addr = re.sub(clean_regex, '', destination, flags=re.I).strip()
@@ -152,12 +157,18 @@ async def smart_extract(text: str) -> dict:
         # Merge AI stops and missing fields into regex data
         data["pickups"] = ai_data.get("pickups", [])
         data["deliveries"] = ai_data.get("deliveries", [])
+        
+        # Priority: Trust Regex for ID/Broker if AI gets confused by Solvera headers
         if not data["load_number"]: data["load_number"] = ai_data.get("load_number")
         if not data["rate"] or data["rate"] == "0.00": data["rate"] = ai_data.get("rate")
-        if not data["total_miles"] or data["total_miles"] == "0": data["total_miles"] = ai_data.get("total_miles")
+        
+        # CRITICAL: Trust PDF mileage (Regex) before OSRM map calculations
+        if not data["total_miles"] or data["total_miles"] == "0": 
+            data["total_miles"] = ai_data.get("total_miles")
+        
         if not data["broker"]: data["broker"] = ai_data.get("broker")
 
-    # 3. Final Mileage Check (If PDF and AI both failed)
+    # 3. Final Mileage Check (ONLY if both PDF and AI completely failed)
     if not data.get("total_miles") or str(data["total_miles"]) in ["", "N/A", "0"]:
         if data.get("pickups") and data.get("deliveries"):
             miles = await get_miles_free(data["pickups"][0]["address"], data["deliveries"][-1]["address"])

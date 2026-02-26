@@ -1,6 +1,5 @@
 from jinja2 import Template, exceptions
 import re
-from datetime import datetime
 
 # Alice's default style remains a backup 💅
 DEFAULT_TEMPLATE = """
@@ -15,6 +14,7 @@ DEFAULT_TEMPLATE = """
 <b>TOTAL MILES:</b> {{ total_miles }}
 <b>RATE:</b> {{ rate }}
 <b>PER MILE:</b> {{ per_mile }}
+<b>DURATION:</b> {{ duration }}
 """
 
 def _format_address(addr: str) -> str:
@@ -53,39 +53,23 @@ def _build_stop_string(stop_list: list) -> str:
     
     return "\n".join(parts)
 
-def _calculate_duration(pickups: list, deliveries: list) -> str:
-    """Alice calculates how long the trip takes. 🕒"""
-    try:
-        if not pickups or not deliveries:
-            return "N/A"
-        
-        # Extract first PU and last DEL times
-        pu_str = pickups[0].get("time", "")
-        del_str = deliveries[-1].get("time", "")
-        
-        # Regex to find dates (MM/DD/YYYY or MM/DD/YY)
-        date_pattern = re.compile(r"(\d{1,2}/\d{1,2}/\d{2,4})")
-        pu_match = date_pattern.search(pu_str)
-        del_match = date_pattern.search(del_str)
-        
-        if pu_match and del_match:
-            d1_str = pu_match.group(1)
-            d2_str = del_match.group(1)
-            
-            # Flexible year formatting
-            fmt1 = "%m/%d/%y" if len(d1_str.split('/')[-1]) == 2 else "%m/%d/%Y"
-            fmt2 = "%m/%d/%y" if len(d2_str.split('/')[-1]) == 2 else "%m/%d/%Y"
-            
-            d1 = datetime.strptime(d1_str, fmt1)
-            d2 = datetime.strptime(d2_str, fmt2)
-            diff = d2 - d1
-            
-            days = diff.days
-            # Default to at least 14h for overnight loads as requested
-            return f"{max(0, days)}d 14h"
-    except:
-        pass
-    return "0d 14h"
+def _calculate_drive_duration(miles_float: float) -> str:
+    """
+    Alice calculates duration based on a 700-mile driving day (~14-15 hours).
+    Includes a 2-hour buffer for loading/unloading. 🚛
+    """
+    if miles_float <= 0:
+        return "N/A"
+    
+    # Logic: 700 miles per day rule
+    # 700 miles in a 14-hour duty day = ~50mph average speed.
+    # We add 2 hours total for the PU and DEL stops.
+    total_hours = (miles_float / 50) + 2
+    
+    hours = int(total_hours)
+    minutes = int((total_hours - hours) * 60)
+    
+    return f"{hours}h {minutes}m"
 
 def render_result(data: dict, user_template: str = None) -> str:
     """Converts raw JSON into a beautifully formatted Telegram message 🥱."""
@@ -111,8 +95,8 @@ def render_result(data: dict, user_template: str = None) -> str:
         rate_display = raw_rate if raw_rate != "0" else "N/A"
         per_mile = "N/A"
 
-    # 3. Trip Duration 🕒
-    duration = _calculate_duration(data.get("pickups", []), data.get("deliveries", []))
+    # 3. Trip Duration based on mileage (700mi/day rule) 🕒
+    duration = _calculate_drive_duration(miles_float)
 
     # 4. Create the unified info blocks
     pickup_info = _build_stop_string(data.get("pickups", []))
@@ -145,4 +129,3 @@ def render_result(data: dict, user_template: str = None) -> str:
     
     except exceptions.TemplateError as e:
         return f"⚠️ <b>Template Error:</b> {str(e)}\n\nDon't break my code, honey. 💅"
-    
