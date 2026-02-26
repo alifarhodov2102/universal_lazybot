@@ -18,16 +18,30 @@ DEFAULT_TEMPLATE = """
 """
 
 def _format_address(addr: str) -> str:
-    """Alice makes the address readable by forcing City, ST Zip to a new line. 💅"""
+    """
+    Alice makes the address readable by forcing City, State Zip to a new line. 💅
+    """
     if not addr:
         return ""
+    
     addr = addr.strip()
-    if "," in addr:
-        # Split from the right to separate City, ST Zip
-        parts = addr.rsplit(",", 1)
-        street = parts[0].strip()
-        location = parts[1].strip()
+    
+    # Split by commas to identify street vs location
+    parts = [p.strip() for p in addr.split(",")]
+    
+    # Handle long US addresses: Street, City, ST Zip, USA
+    if len(parts) >= 3:
+        # Join everything before the City (e.g., Street and Suite)
+        street = ", ".join(parts[:-3]) if len(parts) > 3 else parts[0]
+        # Join City, State, and Country for the second line
+        location = ", ".join(parts[-3:])
         return f"{street},\n{location}"
+    
+    # Fallback for shorter addresses: split at the last comma
+    if "," in addr:
+        parts = addr.rsplit(",", 1)
+        return f"{parts[0].strip()},\n{parts[1].strip()}"
+        
     return addr
 
 def _build_stop_string(stop_list: list) -> str:
