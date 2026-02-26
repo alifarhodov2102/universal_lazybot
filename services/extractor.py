@@ -52,12 +52,12 @@ def regex_extract(text: str) -> dict:
     
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     
-    # Alice skips the headers (PRO #, Date, EST) to find the REAL broker 💅
-    # This specifically addresses the "Broker: PRO# 62055..." bug
-    for line in lines[:6]:
-        # Skip if line contains a date (XX/XX/XX) or "PRO #" or "Rate Confirmation"
+    # Alice skips the headers and contact noise to find the REAL broker 💅
+    # Specifically ignores dates, PRO #, Page #, and "G, F |" strings
+    for line in lines[:10]:
         if not re.search(r'\d{1,2}/\d{1,2}/\d{2,4}', line) and \
-           not re.search(r'PRO\s*#|Rate\s*Confirmation|Page\s*\d', line, re.I):
+           not re.search(r'PRO\s*#|Rate\s*Confirmation|Page\s*\d|G,\s*F\s*\|', line, re.I) and \
+           len(line) > 3:
             data["broker"] = line[:100]
             break
 
@@ -156,18 +156,18 @@ async def smart_extract(text: str) -> dict:
     ai_data = await deepseek_ai_extract(text)
     
     if ai_data:
-        # Merge AI stops and missing fields into regex data
         data["pickups"] = ai_data.get("pickups", [])
         data["deliveries"] = ai_data.get("deliveries", [])
         
-        # Priority: Trust Regex for ID/Broker if AI gets confused by Solvera headers
+        # Priority: Trust Regex if it caught the ID/Broker clearly
         if not data["load_number"]: data["load_number"] = ai_data.get("load_number")
         if not data["rate"] or data["rate"] == "0.00": data["rate"] = ai_data.get("rate")
         
-        # CRITICAL: Trust PDF mileage (Regex) before OSRM map calculations
+        # CRITICAL: Trust PDF mileage (Regex) before map calculations
         if not data["total_miles"] or data["total_miles"] == "0": 
             data["total_miles"] = ai_data.get("total_miles")
         
+        # If Regex failed to find broker cleanly, take AI's best guess
         if not data["broker"]: data["broker"] = ai_data.get("broker")
 
     # 3. Final Mileage Check (ONLY if both PDF and AI completely failed)
