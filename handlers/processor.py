@@ -5,7 +5,7 @@ import random
 import logging
 from datetime import date, datetime
 from aiogram import Router, types, F, Bot
-from sqlalchemy import select, text
+from sqlalchemy import select
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.enums import ParseMode
 from aiogram.fsm.context import FSMContext
@@ -21,207 +21,291 @@ from config import ADMIN_IDS
 logger = logging.getLogger("LazyAlice.Processor")
 router = Router()
 
-# ================= GLOBAL STATE =================
-# Single queue to rule them all. No more dictionary mess. 💅
-extraction_queue = asyncio.Queue()
+# ================= GLOBALS =================
+user_queues: dict[int, asyncio.Queue] = {}
+user_workers: dict[int, asyncio.Task] = {}
 media_group_tracker: dict[str, int] = {}
 
 MEDIA_GROUP_LIMIT = 5
 FREE_DAILY_LIMIT = 10
 
-# ================= PERMISSION HELPER =================
-async def get_user_context(uid: int) -> tuple[bool, int, str]:
-    """Fetches everything Alice needs in one DB hit. 🏥"""
+
+# ================= LIMIT CHECK =================
+async def check_and_update_limit(uid: int) -> tuple[bool, int]:
+    """Deep user check with safe expiry handling. 💅"""
     async with AsyncSessionLocal() as session:
-        # 🟢 CRITICAL: Clear session cache to see 'is_pro' updates immediately.
-        await session.execute(text("COMMIT"))
-        
         stmt = select(User).where(User.tg_id == uid)
         res = await session.execute(stmt)
         user = res.scalar_one_or_none()
-        
+
         if not user:
-            return False, 0, ""
+            return False, 0
 
         is_admin = uid in ADMIN_IDS
         now = datetime.utcnow()
-        
-        # Robust Pro check
+
+        # ✅ FIXED: always define expiry safely
+        expiry = user.expiry_date if user.is_pro else None
+
         is_pro_active = False
+
         if user.is_pro:
-            expiry = user.expiry_date
-            if expiry is None or (expiry.replace(tzinfo=None) if expiry.tzinfo else expiry) > now:
+            if expiry is None:
                 is_pro_active = True
-        
-        # Capture template now so worker doesn't need to touch DB
-        template = str(user.template_text or "")
-        
-        logger.info(f"🔍 [DB CHECK] UID: {uid} | Pro: {is_pro_active} | Admin: {is_admin}")
+            else:
+                # normalize tz
+                if expiry.tzinfo is not None:
+                    expiry = expiry.replace(tzinfo=None)
 
+                if expiry > now:
+                    is_pro_active = True
+
+        logger.info(
+            f"User {uid} check: Admin={is_admin}, "
+            f"Pro={is_pro_active}, Used={user.daily_requests}"
+        )
+
+        # ✅ Unlimited users
         if is_admin or is_pro_active:
-            return True, 999, template
+            return True, 999
 
-        # Free daily logic
+        # ===== Free user logic =====
         today = date.today()
+
         if user.last_request_date != today:
             user.daily_requests = 0
             user.last_request_date = today
             await session.commit()
-        
+            await session.refresh(user)
+
         if user.daily_requests >= FREE_DAILY_LIMIT:
-            return False, 0, template
-            
+            return False, 0
+
         user.daily_requests += 1
         await session.commit()
-        return True, (FREE_DAILY_LIMIT - user.daily_requests), template
 
-# ================= GLOBAL WORKER =================
-async def global_pdf_worker(bot: Bot):
-    """The heart of Alice. Processes the global queue one by one. ☕💅"""
-    logger.info("⚙️ Global PDF Worker is now ONLINE.")
-    while True:
-        # Ждем задачу из очереди
-        item = await extraction_queue.get()
-        
-        uid = item["uid"]
-        chat_id = item["chat_id"]
-        file_id = item["file_id"]
-        status_id = item["status_msg_id"]
-        reply_id = item["reply_to_id"]
-        template = item["template"]
-        
-        tmp_path = None
-        try:
-            logger.info(f"🚀 Processing file for {uid}...")
-            
-            # ✅ ИСПРАВЛЕНО: Используем именованные аргументы
-            await bot.edit_message_text(
-                text="📄 <b>Downloading...</b> [15%]", 
-                chat_id=chat_id, 
-                message_id=status_id
-            )
-            
-            file = await bot.get_file(file_id)
-            raw = await bot.download_file(file.file_path)
+        return True, (FREE_DAILY_LIMIT - user.daily_requests)
 
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                tmp.write(raw.read())
-                tmp_path = tmp.name
 
-            await bot.edit_message_text(
-                text="🔍 <b>Reading PDF...</b> [45%]", 
-                chat_id=chat_id, 
-                message_id=status_id
-            )
-            
-            text = await extract_text_async(tmp_path)
-            
-            # AI Processing
-            ai_task = asyncio.create_task(smart_extract(text))
-            percent = 50
-            while not ai_task.done():
-                if percent < 95:
-                    percent += 5
-                    try:
-                        await bot.edit_message_text(
-                            text=f"🧠 <b>Thinking...</b> [{percent}%]", 
-                            chat_id=chat_id, 
-                            message_id=status_id
-                        )
-                    except: 
-                        pass
-                await asyncio.sleep(1.5)
-            
-            data = await ai_task
-            
-            # Rendering
-            formatted_output = render_result(data, template)
-            
-            # Отправляем финальный результат
-            await bot.send_message(
-                chat_id=chat_id, 
-                text=formatted_output, 
-                reply_to_message_id=reply_id
-            )
-            logger.info(f"✅ Successfully processed file for {uid}")
+# ================= SAFE EDIT =================
+async def safe_edit_status(bot: Bot, chat_id: int, message_id: int, new_text: str):
+    try:
+        return await bot.edit_message_text(
+            text=new_text,
+            chat_id=chat_id,
+            message_id=message_id,
+            parse_mode=ParseMode.HTML,
+        )
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e).lower():
+            return None
+    except Exception as e:
+        logger.debug(f"safe_edit_status failed: {e}")
+    return None
 
-        except Exception as e:
-            logger.error(f"❌ Worker error for {uid}: {e}")
+
+# ================= WORKER =================
+async def process_user_queue(uid: int, bot: Bot):
+    """Processes personal queue safely. ☕"""
+    q = user_queues.get(uid)
+    if not q:
+        return
+
+    logger.info(f"🚀 Worker started for user {uid}")
+
+    try:
+        while True:
             try:
-                await bot.send_message(
-                    chat_id=chat_id, 
-                    text=f"🙄 <b>Error:</b> <code>{e}</code>", 
-                    reply_to_message_id=reply_id
-                )
-            except: 
-                pass
-        finally:
-            # Cleanup
-            try: 
-                await bot.delete_message(chat_id=chat_id, message_id=status_id)
-            except: 
-                pass
-            if tmp_path and os.path.exists(tmp_path): 
-                os.remove(tmp_path)
-            extraction_queue.task_done()
+                item = await asyncio.wait_for(q.get(), timeout=10)
+            except asyncio.TimeoutError:
+                # ✅ only stop if still empty
+                if q.empty():
+                    logger.info(f"🛑 Worker idle timeout for user {uid}")
+                    break
+                continue
 
-# ================= HANDLERS =================
+            chat_id = item["chat_id"]
+            file_id = item["file_id"]
+            status_msg_id = item["status_msg_id"]
+            reply_to_id = item["reply_to_id"]
+
+            tmp_path = None
+
+            try:
+                await safe_edit_status(
+                    bot, chat_id, status_msg_id,
+                    "📄 <b>Downloading...</b> [15%]"
+                )
+
+                file = await bot.get_file(file_id)
+                raw = await bot.download_file(file.file_path)
+
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                    tmp.write(raw.read())
+                    tmp_path = tmp.name
+
+                await safe_edit_status(
+                    bot, chat_id, status_msg_id,
+                    "🔍 <b>Reading tiny text...</b> [45%]"
+                )
+
+                text = await extract_text_async(tmp_path)
+
+                ai_task = asyncio.create_task(smart_extract(text))
+                percent = 50
+
+                while not ai_task.done():
+                    if percent < 95:
+                        percent += 5
+                        await safe_edit_status(
+                            bot,
+                            chat_id,
+                            status_msg_id,
+                            f"🧠 <b>Thinking...</b> [{percent}%]"
+                        )
+                    await asyncio.sleep(1.2)
+
+                data = await ai_task
+
+                async with AsyncSessionLocal() as session:
+                    stmt = select(User).where(User.tg_id == uid)
+                    res = await session.execute(stmt)
+                    user = res.scalar_one_or_none()
+                    template = user.template_text if user else None
+
+                formatted_output = render_result(data, template)
+
+                await bot.send_message(
+                    chat_id,
+                    formatted_output,
+                    reply_to_message_id=reply_to_id,
+                    parse_mode=ParseMode.HTML,
+                )
+
+            except Exception as e:
+                logger.exception(f"Worker Error for {uid}")
+                await bot.send_message(
+                    chat_id,
+                    f"🙄 <b>Error:</b>\n<code>{str(e)}</code>",
+                    reply_to_message_id=reply_to_id,
+                )
+
+            finally:
+                try:
+                    await bot.delete_message(chat_id, status_msg_id)
+                except Exception:
+                    pass
+
+                if tmp_path and os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+
+                q.task_done()
+
+    finally:
+        logger.info(f"💤 Worker stopped for user {uid}")
+        user_workers.pop(uid, None)
+
+
+# ================= PDF HANDLER =================
 @router.message(F.document.mime_type == "application/pdf")
 async def handle_pdf(message: types.Message, bot: Bot):
     uid = message.from_user.id
     mg_id = message.media_group_id
 
-    # 1. Permission check and data pre-fetching
-    allowed, left, template = await get_user_context(uid)
+    # 1. Limit check
+    allowed, left = await check_and_update_limit(uid)
     if not allowed:
-        return await message.answer("💸 <b>Daily Limit Reached!</b> Upgrade to /plans. 💅")
+        return await message.answer(
+            "💸 <b>Daily Limit Reached!</b>\n\nUpgrade to /plans now. 💅"
+        )
 
-    # 2. Batching limit
+    # 2. Media group limit + auto cleanup
     if mg_id:
-        media_group_tracker[mg_id] = media_group_tracker.get(mg_id, 0) + 1
+        media_group_tracker.setdefault(mg_id, 0)
+        media_group_tracker[mg_id] += 1
+
         if media_group_tracker[mg_id] > MEDIA_GROUP_LIMIT:
             if media_group_tracker[mg_id] == MEDIA_GROUP_LIMIT + 1:
-                await message.reply("💅 <b>Honey, stop!</b> Limit 5 PDFs per batch.")
+                await message.reply(
+                    "💅 <b>Honey, stop!</b> My limit is 5 PDFs. Ignoring the rest."
+                )
             return
-        # Background cleanup for the tracker
-        asyncio.create_task(_cleanup_mg(mg_id))
 
-    # 3. Queue Notification
+        # cleanup after some time
+        asyncio.create_task(_cleanup_media_group(mg_id))
+
+    # 3. Ensure queue exists
+    user_queues.setdefault(uid, asyncio.Queue())
+
     left_text = "Unlimited" if left == 999 else f"{left} left today"
-    q_pos = extraction_queue.qsize()
-    
+    q_pos = user_queues[uid].qsize()
+
     status_text = f"👀 <b>I woke up...</b> ({left_text})"
     if q_pos > 0:
         status_text += f"\n📥 <i>Position in queue: {q_pos + 1}</i>"
-        
+
     initial_msg = await message.reply(status_text)
 
-    # 4. Add to Global Queue
-    await extraction_queue.put({
-        "uid": uid,
-        "chat_id": message.chat.id, 
+    await user_queues[uid].put({
+        "chat_id": message.chat.id,
         "file_id": message.document.file_id,
-        "status_msg_id": initial_msg.message_id, 
+        "status_msg_id": initial_msg.message_id,
         "reply_to_id": message.message_id,
-        "template": template
     })
 
-async def _cleanup_mg(mg_id: str):
+    logger.info(f"📥 User {uid} queue size: {user_queues[uid].qsize()}")
+
+    # 4. Start worker if needed
+    if uid not in user_workers or user_workers[uid].done():
+        user_workers[uid] = asyncio.create_task(process_user_queue(uid, bot))
+
+
+async def _cleanup_media_group(mg_id: str):
     await asyncio.sleep(120)
     media_group_tracker.pop(mg_id, None)
 
+
+# ================= ADMIN =================
 @router.message(Command("check_user"))
 async def admin_check_user(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS: return
-    args = message.text.split()
-    if len(args) < 2: return await message.answer("Usage: <code>/check_user ID</code>")
-    
-    # Simple reuse of context helper
-    _, left, _ = await get_user_context(int(args[1]))
-    status = "👑 PRO" if left == 999 else "🆓 FREE"
-    await message.answer(f"👤 User: {args[1]}\n📊 Status: {status}\n📈 Left: {left if left != 999 else 'Inf'}")
+    if message.from_user.id not in ADMIN_IDS:
+        return
 
+    args = message.text.split()
+    if len(args) < 2:
+        return await message.answer("Usage: <code>/check_user [tg_id]</code>")
+
+    try:
+        target_id = int(args[1])
+
+        async with AsyncSessionLocal() as session:
+            stmt = select(User).where(User.tg_id == target_id)
+            res = await session.execute(stmt)
+            user = res.scalar_one_or_none()
+
+        if not user:
+            return await message.answer("User not found.")
+
+        status = "👑 PRO" if user.is_pro else "🆓 FREE"
+
+        info = (
+            f"👤 <b>User:</b> <code>{target_id}</code>\n"
+            f"📊 <b>Status:</b> {status}\n"
+            f"📅 <b>Expiry:</b> {user.expiry_date if user.expiry_date else 'N/A'}\n"
+            f"📈 <b>Used:</b> {user.daily_requests}/{FREE_DAILY_LIMIT}"
+        )
+
+        await message.answer(info)
+
+    except Exception:
+        await message.answer("Invalid ID.")
+
+
+# ================= SASSY CHAT =================
 @router.message(F.text & ~F.text.startswith("/"))
 async def sassy_chat(message: types.Message, state: FSMContext):
-    if await state.get_state() is not None: return
-    await message.reply(random.choice(["🙄 Send a PDF.", "💅 Only PDFs.", "🥱 Send the RC."]))
+    if await state.get_state() is not None:
+        return
+
+    responses = ["🙄 Send a PDF.", "💅 Only PDFs.", "🥱 Send the RC."]
+    await message.reply(random.choice(responses), parse_mode=ParseMode.HTML)
