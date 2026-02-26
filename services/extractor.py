@@ -52,21 +52,25 @@ def regex_extract(text: str) -> dict:
     
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     
-    # Alice skips the headers and contact noise to find the REAL broker 💅
-    # Specifically ignores dates, PRO #, Page #, and "G, F |" strings
-    for line in lines[:10]:
-        if not re.search(r'\d{1,2}/\d{1,2}/\d{2,4}', line) and \
-           not re.search(r'PRO\s*#|Rate\s*Confirmation|Page\s*\d|G,\s*F\s*\|', line, re.I) and \
-           len(line) > 3:
-            data["broker"] = line[:100]
-            break
+    # Alice is now trained to ignore phone numbers and headers 💅
+    for line in lines[:12]:
+        # Skip dates (XX/XX/XX)
+        if re.search(r'\d{1,2}/\d{1,2}/\d{2,4}', line): continue
+        # Skip PRO # or Rate Confirmation headers
+        if re.search(r'PRO\s*#|Rate\s*Confirmation|Page\s*\d', line, re.I): continue
+        # Skip phone numbers like (704) 706-4909
+        if re.search(r'\(\d{3}\)\s*\d{3}-\d{4}', line): continue
+        # Skip lines that are just noise or too short
+        if len(line) < 5 or line.startswith('('): continue
+        
+        # If it passes all checks, it's our Broker!
+        data["broker"] = line[:100]
+        break
 
     if load_match := LOAD_RE.search(text):
         data["load_number"] = load_match.group(1)
-
     if rate_match := RATE_RE.search(text):
         data["rate"] = rate_match.group(1)
-
     if miles_match := MILES_RE.search(text):
         data["total_miles"] = miles_match.group(1)
         
