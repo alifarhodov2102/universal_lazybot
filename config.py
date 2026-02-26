@@ -7,7 +7,7 @@ load_dotenv()
 # Telegram Bot sozlamalari
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN .env faylida topilmadi!")
+    raise ValueError("BOT_TOKEN .env not found!")
 
 # DeepSeek API sozlamalari
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
@@ -17,7 +17,7 @@ DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
 if not DEEPSEEK_API_KEY:
     # Agarda DeepSeek bo'lmasa bot ishlayverishi mumkin, 
     # lekin extraction sifatiga ta'sir qiladi
-    print("Warning: DEEPSEEK_API_KEY topilmadi. AI extraction ishlamasligi mumkin.")
+    print("Warning: DEEPSEEK_API_KEY not found. AI extraction might not work.")
 
 # Ma'lumotlar bazasi sozlamalari
 # Railway-da agar Postgres ulasangiz, DATABASE_URL avtomatik beriladi

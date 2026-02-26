@@ -3,13 +3,12 @@ import tempfile
 import asyncio
 import random
 import logging
-import time
 from datetime import date, datetime
-from typing import Dict, Any
+from typing import Dict, Any, Callable, Awaitable, Optional
 
 from aiogram import Router, types, F, Bot
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from sqlalchemy import select
@@ -32,6 +31,85 @@ media_group_tracker: Dict[str, int] = {}
 
 MEDIA_GROUP_LIMIT = 5
 FREE_DAILY_LIMIT = 10
+
+# Limit heavy work globally (OCR + AI) to avoid CPU/RAM spikes + Telegram floods
+GLOBAL_PROCESS_SEM = asyncio.Semaphore(2)
+
+# Keep Telegram output under control (send/edit/delete)
+TG_SEND_SEM = asyncio.Semaphore(1)
+
+
+# ================= TELEGRAM CALL HELPERS =================
+async def tg_call_with_retry(
+    call_factory: Callable[[], Awaitable[Any]],
+    *,
+    max_retries: int = 5,
+    tag: str = "tg_call"
+) -> Any:
+    """
+    Retries Telegram API calls when Flood Control triggers (TelegramRetryAfter).
+    This prevents worker crashes like in your logs. :contentReference[oaicite:0]{index=0}
+    """
+    last_exc: Optional[Exception] = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            async with TG_SEND_SEM:
+                return await call_factory()
+        except TelegramRetryAfter as e:
+            last_exc = e
+            sleep_s = max(1, int(getattr(e, "retry_after", 1))) + 1
+            logger.warning("⏳ Flood control in %s. Retry in %ss (attempt %s/%s)", tag, sleep_s, attempt, max_retries)
+            await asyncio.sleep(sleep_s)
+        except Exception as e:
+            last_exc = e
+            if attempt >= max_retries:
+                raise
+            logger.warning("⚠️ Telegram error in %s: %s (attempt %s/%s)", tag, e, attempt, max_retries)
+            await asyncio.sleep(1)
+
+    if last_exc:
+        raise last_exc
+    return None
+
+
+async def safe_edit_status(bot: Bot, chat_id: int, message_id: int, new_text: str):
+    """
+    Safe edit with retry-after handling + ignores harmless 'message is not modified'.
+    """
+    async def _call():
+        return await bot.edit_message_text(
+            text=new_text,
+            chat_id=chat_id,
+            message_id=message_id,
+            parse_mode=ParseMode.HTML,
+        )
+
+    try:
+        return await tg_call_with_retry(_call, tag="edit_message_text")
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e).lower():
+            return None
+    except Exception as e:
+        logger.debug("safe_edit_status failed: %s", e)
+    return None
+
+
+async def safe_delete_message(bot: Bot, chat_id: int, message_id: int):
+    async def _call():
+        return await bot.delete_message(chat_id=chat_id, message_id=message_id)
+
+    try:
+        return await tg_call_with_retry(_call, tag="delete_message")
+    except Exception:
+        return None
+
+
+async def safe_send_message(bot: Bot, **kwargs):
+    async def _call():
+        return await bot.send_message(**kwargs)
+
+    return await tg_call_with_retry(_call, tag="send_message")
 
 
 # ================= LIMIT CHECK =================
@@ -58,15 +136,9 @@ async def check_and_update_limit(uid: int) -> tuple[bool, int]:
             if expiry is None:
                 is_pro_active = True
             else:
-                # normalize tz-aware datetimes to naive
                 if getattr(expiry, "tzinfo", None) is not None:
                     expiry = expiry.replace(tzinfo=None)
                 is_pro_active = expiry > now
-
-        logger.info(
-            "User %s check: Admin=%s, Pro=%s, Used=%s",
-            uid, is_admin, is_pro_active, user.daily_requests
-        )
 
         # Unlimited users
         if is_admin or is_pro_active:
@@ -86,24 +158,6 @@ async def check_and_update_limit(uid: int) -> tuple[bool, int]:
         user.daily_requests += 1
         await session.commit()
         return True, max(0, FREE_DAILY_LIMIT - user.daily_requests)
-
-
-# ================= SAFE STATUS EDIT =================
-async def safe_edit_status(bot: Bot, chat_id: int, message_id: int, new_text: str):
-    try:
-        return await bot.edit_message_text(
-            text=new_text,
-            chat_id=chat_id,
-            message_id=message_id,
-            parse_mode=ParseMode.HTML,
-        )
-    except TelegramBadRequest as e:
-        # Ignore harmless "message is not modified"
-        if "message is not modified" in str(e).lower():
-            return None
-    except Exception as e:
-        logger.debug("safe_edit_status failed: %s", e)
-    return None
 
 
 # ================= WORKER =================
@@ -136,7 +190,8 @@ async def process_user_queue(uid: int, bot: Bot):
             tmp_path = None
 
             try:
-                await safe_edit_status(bot, chat_id, status_msg_id, "📄 <b>Downloading...</b> [15%]")
+                # Keep progress updates minimal to avoid flood limits (your logs show RetryAfter) :contentReference[oaicite:1]{index=1}
+                await safe_edit_status(bot, chat_id, status_msg_id, "📄 <b>Downloading...</b>")
 
                 tg_file = await bot.get_file(file_id)
                 raw = await bot.download_file(tg_file.file_path)
@@ -145,26 +200,13 @@ async def process_user_queue(uid: int, bot: Bot):
                     tmp.write(raw.read())
                     tmp_path = tmp.name
 
-                await safe_edit_status(bot, chat_id, status_msg_id, "🔍 <b>Reading tiny text...</b> [45%]")
-                text = await extract_text_async(tmp_path)
+                await safe_edit_status(bot, chat_id, status_msg_id, "🔍 <b>Extracting text...</b>")
 
-                # Run AI extraction and show progress
-                ai_task = asyncio.create_task(smart_extract(text))
-                percent = 50
-                last_update = 0.0
-
-                while not ai_task.done():
-                    now_ts = time.time()
-                    if now_ts - last_update >= 1.2 and percent < 95:
-                        percent += 5
-                        await safe_edit_status(
-                            bot, chat_id, status_msg_id,
-                            f"🧠 <b>Thinking...</b> [{percent}%]"
-                        )
-                        last_update = now_ts
-                    await asyncio.sleep(0.25)
-
-                data = await ai_task
+                # Global semaphore avoids CPU/RAM spikes when user sends many PDFs
+                async with GLOBAL_PROCESS_SEM:
+                    text = await extract_text_async(tmp_path)
+                    await safe_edit_status(bot, chat_id, status_msg_id, "🧠 <b>Analyzing...</b>")
+                    data = await smart_extract(text)
 
                 # Fetch user's custom template (if any)
                 async with AsyncSessionLocal() as session:
@@ -174,7 +216,8 @@ async def process_user_queue(uid: int, bot: Bot):
 
                 formatted_output = render_result(data, template)
 
-                await bot.send_message(
+                await safe_send_message(
+                    bot,
                     chat_id=chat_id,
                     text=formatted_output,
                     reply_to_message_id=reply_to_id,
@@ -183,19 +226,20 @@ async def process_user_queue(uid: int, bot: Bot):
 
             except Exception as e:
                 logger.exception("Worker Error for %s", uid)
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=f"🙄 <b>Error:</b>\n<code>{str(e)}</code>",
-                    reply_to_message_id=reply_to_id,
-                    parse_mode=ParseMode.HTML,
-                )
+                try:
+                    await safe_send_message(
+                        bot,
+                        chat_id=chat_id,
+                        text=f"🙄 <b>Error:</b>\n<code>{str(e)}</code>",
+                        reply_to_message_id=reply_to_id,
+                        parse_mode=ParseMode.HTML,
+                    )
+                except Exception:
+                    pass
 
             finally:
                 # Remove progress message
-                try:
-                    await bot.delete_message(chat_id, status_msg_id)
-                except Exception:
-                    pass
+                await safe_delete_message(bot, chat_id, status_msg_id)
 
                 # Cleanup temp file
                 if tmp_path and os.path.exists(tmp_path):
@@ -222,7 +266,7 @@ async def handle_pdf(message: types.Message, bot: Bot):
     if not allowed:
         return await message.answer(
             "💸 <b>Daily Limit Reached!</b>\n\nUpgrade to /plans now. 💅",
-            parse_mode=ParseMode.HTML
+            parse_mode=ParseMode.HTML,
         )
 
     # 2) Media group limit + cleanup
@@ -233,7 +277,7 @@ async def handle_pdf(message: types.Message, bot: Bot):
             if media_group_tracker[mg_id] == MEDIA_GROUP_LIMIT + 1:
                 await message.reply(
                     "💅 <b>Honey, stop!</b> My limit is 5 PDFs. Ignoring the rest.",
-                    parse_mode=ParseMode.HTML
+                    parse_mode=ParseMode.HTML,
                 )
             return
 
@@ -251,12 +295,14 @@ async def handle_pdf(message: types.Message, bot: Bot):
 
     initial_msg = await message.reply(status_text, parse_mode=ParseMode.HTML)
 
-    await user_queues[uid].put({
-        "chat_id": message.chat.id,
-        "file_id": message.document.file_id,
-        "status_msg_id": initial_msg.message_id,
-        "reply_to_id": message.message_id,
-    })
+    await user_queues[uid].put(
+        {
+            "chat_id": message.chat.id,
+            "file_id": message.document.file_id,
+            "status_msg_id": initial_msg.message_id,
+            "reply_to_id": message.message_id,
+        }
+    )
 
     logger.info("📥 User %s queue size: %s", uid, user_queues[uid].qsize())
 
@@ -307,4 +353,7 @@ async def admin_check_user(message: types.Message):
 async def sassy_chat(message: types.Message, state: FSMContext):
     if await state.get_state() is not None:
         return
-    await message.reply(random.choice(["🙄 Send a PDF.", "💅 Only PDFs.", "🥱 Send the RC."]), parse_mode=ParseMode.HTML)
+    await message.reply(
+        random.choice(["🙄 Send a PDF.", "💅 Only PDFs.", "🥱 Send the RC."]),
+        parse_mode=ParseMode.HTML,
+    )
