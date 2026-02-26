@@ -71,10 +71,11 @@ async def get_miles_free(origin: str, destination: str) -> str:
         return ", ".join(unique_parts)
 
     async def fetch_coords(addr, client):
-        # FIXED: Pure URL string. Removed all brackets and markdown noise.
-        url = f"[https://nominatim.openstreetmap.org/search?q=](https://nominatim.openstreetmap.org/search?q=){addr}&format=json&limit=1"
+        # FIXED: Pure URL with query params for safety
+        url = "[https://nominatim.openstreetmap.org/search](https://nominatim.openstreetmap.org/search)"
+        params = {"q": addr, "format": "json", "limit": 1}
         try:
-            r = await client.get(url, headers={"User-Agent": "LazyBot_Logistics/2.0"}, timeout=10)
+            r = await client.get(url, params=params, headers={"User-Agent": "LazyBot_Logistics/2.0"}, timeout=15)
             if r.status_code == 200 and r.json():
                 return r.json()[0]["lat"], r.json()[0]["lon"]
         except Exception as e:
@@ -90,7 +91,7 @@ async def get_miles_free(origin: str, destination: str) -> str:
 
         if o_coords and d_coords:
             try:
-                # FIXED: Pure URL string. Removed all brackets and markdown noise.
+                # FIXED: Clean OSRM Protocol string
                 osrm_url = f"[http://router.project-osrm.org/route/v1/driving/](http://router.project-osrm.org/route/v1/driving/){o_coords[1]},{o_coords[0]};{d_coords[1]},{d_coords[0]}?overview=false"
                 res = await client.get(osrm_url, timeout=10)
                 if res.status_code == 200:
@@ -165,7 +166,7 @@ async def smart_extract(text: str) -> dict:
         if not data.get("rate") or data["rate"] == "0.00":
             data["rate"] = rate_match.group(1)
 
-    # 2. Cumulative Mileage Logic: Leg 1 + Leg 2 + ...
+    # 2. Cumulative Mileage Logic: PU1 -> DEL1 -> DEL2
     if not data.get("total_miles") or str(data["total_miles"]) in ["", "N/A", "0"]:
         if data.get("pickups") and data.get("deliveries"):
             all_stops = data["pickups"] + data["deliveries"]
