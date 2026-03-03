@@ -22,7 +22,8 @@ async def show_plans(message: types.Message):
         "✅ Full OCR & Priority AI processing\n\n"
         "💳 <b>Manual Card Payment (Visa):</b>\n"
         "<code>4231200092181873</code> (Click to copy)\n\n"
-        "👤 <b>Name:</b> Ali Farhodov\n\n"
+        "👤 <b>Name on card:</b> Ali Farhodov (Alice's Creator 👨‍💻)\n\n"
+        "🎀 <b>Customer Support:</b> Alice (Female Admin 💅)\n"
         "⚠️ <i>Send the receipt to @lazyalice_admin after paying for manual activation.</i>"
     )
     
