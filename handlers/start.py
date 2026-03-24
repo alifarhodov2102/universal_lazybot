@@ -1,5 +1,5 @@
 import random
-from datetime import date
+from datetime import date, timedelta
 
 from aiogram import Router, types, F
 from aiogram.filters import CommandStart, Command
@@ -15,12 +15,14 @@ from services.extractor import extract_template_structure
 
 router = Router()
 
+# Updated Constant to match processor and billing 💅
+FREE_WEEKLY_LIMIT = 5
 
 # ================= START =================
 
 @router.message(CommandStart())
 async def cmd_start(message: types.Message):
-    """Simple and clear welcome for drivers 🚛"""
+    """Alice greets the drivers and checks their weekly quota 🥱"""
     tg_id = message.from_user.id
     full_name = message.from_user.full_name
 
@@ -35,10 +37,11 @@ async def cmd_start(message: types.Message):
         user = result.scalar_one_or_none()
 
         if not user:
+            # Registration for new users
             user = User(
                 tg_id=tg_id,
                 username=message.from_user.username,
-                daily_requests=0,
+                weekly_requests=0,
                 last_request_date=date.today()
             )
             session.add(user)
@@ -51,21 +54,29 @@ async def cmd_start(message: types.Message):
                 "1️⃣ Send me a <b>PDF</b> (Rate Confirmation).\n"
                 "2️⃣ Wait a few seconds.\n"
                 "3️⃣ Copy the result and post it.\n\n"
-                "💰 <b>Daily Limit:</b> 10 free RCs every day."
+                f"💰 <b>Trial:</b> {FREE_WEEKLY_LIMIT} free RCs every week. 💅"
             )
         else:
+            # Existing User Status Check
             today = date.today()
-            current_reqs = user.daily_requests if user.last_request_date == today else 0
-
+            
             if user.is_pro:
                 status = "Pro ✅ (Unlimited)"
             else:
-                status = f"Free ({10 - current_reqs}/10 left today)"
+                # Calculate weekly reset logic for visual accuracy
+                days_since_reset = (today - user.last_request_date).days
+                if days_since_reset >= 7:
+                    # If it's a new week, show them their full potential 💅
+                    left = FREE_WEEKLY_LIMIT
+                else:
+                    left = max(0, FREE_WEEKLY_LIMIT - user.weekly_requests)
+                
+                status = f"Free ({left}/{FREE_WEEKLY_LIMIT} left this week) 🆓"
 
             welcome_text = (
                 f"❤️ <b>Welcome back, {full_name}!</b>\n\n"
                 f"Status: <b>{status}</b>\n\n"
-                "Ready to work? Just drop the <b>PDF</b> here."
+                "Ready to work? Just drop the <b>PDF</b> here. 🥱"
             )
 
         await status_msg.edit_text(welcome_text, parse_mode=ParseMode.HTML)
@@ -194,7 +205,7 @@ async def cmd_help(message: types.Message):
         "❓ <b>Need help?</b>\n\n"
         "• Send a PDF (not a photo).\n"
         "• Use /set_template for custom format.\n"
-        "• Daily limit: 10 free extractions.\n\n"
+        f"• Weekly limit: {FREE_WEEKLY_LIMIT} free extractions.\n\n"
         "Support: @lazyalice_admin"
     )
 
