@@ -10,14 +10,17 @@ from database.models import User
 
 router = Router()
 
+# Updated Constant to match processor.py
+FREE_WEEKLY_LIMIT = 5
+
 @router.message(Command("plans"))
 async def show_plans(message: types.Message):
     """Alice presents the toll for her services 💅"""
-    # 1. Info message with updated pricing ($5)
+    # 1. Info message updated for Weekly limits
     plan_details = (
         "✨ <b>Alice's Premium Access</b> ✨\n\n"
         "💰 <b>Price:</b> 250 Stars OR <b>$5</b> / month\n\n"
-        "✅ <b>Unlimited</b> daily RC extractions\n"
+        "✅ <b>Unlimited</b> RC extractions (No weekly caps)\n"
         "✅ AI-Learned Custom Templates\n"
         "✅ Full OCR & Priority AI processing\n\n"
         "💳 <b>Manual Card Payment (Visa):</b>\n"
@@ -30,11 +33,9 @@ async def show_plans(message: types.Message):
     await message.answer(plan_details, parse_mode="HTML")
 
     # 2. Automated invoice for Telegram Stars
-    # 250 Stars = ~ $5.00 roughly matching your UZS price
     prices = [LabeledPrice(label="Pro Plan (30 days)", amount=250)]
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        # Pay button MUST be first and have pay=True
         [InlineKeyboardButton(text="✨ Pay with 250 Stars", pay=True)],
         [InlineKeyboardButton(text="📩 Send Receipt to Admin", url="https://t.me/lazyalice_admin")]
     ])
@@ -63,7 +64,6 @@ async def on_successful_payment(message: types.Message):
     expire_at = datetime.utcnow() + timedelta(days=30)
 
     async with AsyncSessionLocal() as session:
-        # Update user to Pro status immediately upon successful Star payment
         stmt = (
             update(User)
             .where(User.tg_id == tg_id)
@@ -81,7 +81,7 @@ async def on_successful_payment(message: types.Message):
 
 @router.message(Command("status"))
 async def check_status(message: types.Message):
-    """Checking your subscription status and daily usage 🥱"""
+    """Checking your subscription status and weekly usage 🥱"""
     async with AsyncSessionLocal() as session:
         stmt = select(User).where(User.tg_id == message.from_user.id)
         res = await session.execute(stmt)
@@ -99,10 +99,19 @@ async def check_status(message: types.Message):
         else:
             status = f"✅ <b>Pro</b> (Unlimited RCs until: <b>{user.expiry_date.strftime('%d.%m.%Y')}</b>)"
     else:
-        # 2. Free User: Calculate daily limit remaining
-        # Reset visual counter in status if it's a new day
-        current_daily = user.daily_requests if user.last_request_date == today else 0
-        left = max(0, 10 - current_daily)
-        status = f"🆓 <b>Free Plan</b> (<b>{left}/10</b> left today)"
+        # 2. Free User: Calculate weekly limit remaining
+        # Check if 7 days have passed since the last reset date
+        days_since_reset = (today - user.last_request_date).days
+        
+        if days_since_reset >= 7:
+            # If a new week has started, they technically have full points
+            left = FREE_WEEKLY_LIMIT
+            reset_info = "\n<i>Your limit will reset on your next PDF upload.</i>"
+        else:
+            left = max(0, FREE_WEEKLY_LIMIT - user.weekly_requests)
+            next_reset = user.last_request_date + timedelta(days=7)
+            reset_info = f"\n🔄 Next reset: <b>{next_reset.strftime('%d.%m.%Y')}</b>"
+
+        status = f"🆓 <b>Free Plan</b> (<b>{left}/{FREE_WEEKLY_LIMIT}</b> left this week){reset_info}"
 
     await message.answer(f"❤️ <b>Current Status:</b>\n{status}", parse_mode="HTML")

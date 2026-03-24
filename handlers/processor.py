@@ -2,7 +2,7 @@ import os
 import tempfile
 import asyncio
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Dict, Any, Callable, Awaitable, Optional
 
 from aiogram import Router, types, F, Bot
@@ -24,13 +24,13 @@ router = Router()
 # ================= GLOBALS =================
 user_queues: Dict[int, asyncio.Queue] = {}
 user_workers: Dict[int, asyncio.Task] = {}
-media_group_tracker: Dict[str, int] = {}  # required by main.py
+media_group_tracker: Dict[str, int] = {}
 
 MEDIA_GROUP_LIMIT = 5
-FREE_DAILY_LIMIT = 10
+FREE_WEEKLY_LIMIT = 5  # 💅 Lowered from 10/day to 5/week to boost sales
 
-GLOBAL_PROCESS_SEM = asyncio.Semaphore(2)  # limit heavy OCR/AI
-TG_SEND_SEM = asyncio.Semaphore(1)         # limit Telegram send/edit/delete calls
+GLOBAL_PROCESS_SEM = asyncio.Semaphore(2)
+TG_SEND_SEM = asyncio.Semaphore(1)
 
 
 # ================= TELEGRAM SAFE CALL =================
@@ -87,11 +87,11 @@ async def safe_delete(bot: Bot, chat_id: int, message_id: int):
         return None
 
 
-# ================= LIMIT CHECK =================
+# ================= LIMIT CHECK (WEEKLY LOGIC) =================
 async def check_and_update_limit(uid: int) -> tuple[bool, int]:
     """
     Returns: (allowed, left)
-    left = 999 for unlimited
+    Uses a 7-day rolling window for free users.
     """
     async with AsyncSessionLocal() as session:
         res = await session.execute(select(User).where(User.tg_id == uid))
@@ -102,6 +102,7 @@ async def check_and_update_limit(uid: int) -> tuple[bool, int]:
         is_admin = uid in ADMIN_IDS
         now = datetime.utcnow()
 
+        # 1. Pro Check
         is_pro_active = False
         if user.is_pro:
             expiry = user.expiry_date
@@ -115,18 +116,24 @@ async def check_and_update_limit(uid: int) -> tuple[bool, int]:
         if is_admin or is_pro_active:
             return True, 999
 
+        # 2. Weekly Reset Logic ⏱️
         today = date.today()
-        if user.last_request_date != today:
-            user.daily_requests = 0
+        # If it has been 7 or more days since the start of their last cycle, reset
+        if (today - user.last_request_date).days >= 7:
+            user.weekly_requests = 0
             user.last_request_date = today
             await session.commit()
 
-        if user.daily_requests >= FREE_DAILY_LIMIT:
+        # 3. Limit Check
+        if user.weekly_requests >= FREE_WEEKLY_LIMIT:
             return False, 0
 
-        user.daily_requests += 1
+        # 4. Increment usage
+        user.weekly_requests += 1
         await session.commit()
-        return True, max(0, FREE_DAILY_LIMIT - user.daily_requests)
+        
+        left = max(0, FREE_WEEKLY_LIMIT - user.weekly_requests)
+        return True, left
 
 
 # ================= WORKER =================
@@ -221,7 +228,14 @@ async def handle_pdf(message: types.Message, bot: Bot):
 
     allowed, left = await check_and_update_limit(uid)
     if not allowed:
-        return await message.answer("💸 Daily limit reached. Use /plans.", parse_mode=ParseMode.HTML)
+        # 💅 Sassy business-focused rejection
+        return await message.answer(
+            "💸 <b>Weekly limit reached!</b>\n\n"
+            "You only get 5 free RCs per week. "
+            "Upgrade to <b>Pro</b> for unlimited access and beat the competition. 🥱💅\n\n"
+            "Use /plans to see details.", 
+            parse_mode=ParseMode.HTML
+        )
 
     # Limit “send many at once” in media groups
     if mg_id:
@@ -235,7 +249,7 @@ async def handle_pdf(message: types.Message, bot: Bot):
     user_queues.setdefault(uid, asyncio.Queue())
     pos = user_queues[uid].qsize()
 
-    left_text = "Unlimited" if left == 999 else f"{left} left"
+    left_text = "Unlimited" if left == 999 else f"{left} left this week"
     status_text = f"👀 <b>Queued</b> ({left_text})"
     if pos > 0:
         status_text += f"\n📥 <i>Queue position: {pos + 1}</i>"

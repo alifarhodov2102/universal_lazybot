@@ -9,8 +9,10 @@ class User(Base):
     tg_id = Column(BigInteger, unique=True, nullable=False)
     username = Column(String, nullable=True)
     
-    # --- 10 RC Daily Limit Logic 💅 ---
-    daily_requests = Column(Integer, default=0)
+    # --- 5 RC Weekly Limit Logic 💅 ---
+    # We use 'weekly_requests' to track the 5-PDF limit.
+    # 'last_request_date' will now mark the start of their 7-day cycle.
+    weekly_requests = Column(Integer, default=0)
     last_request_date = Column(Date, default=date.today)
     
     is_pro = Column(Boolean, default=False)
@@ -21,4 +23,5 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     def __repr__(self):
-        return f"<User {self.tg_id} - {self.daily_requests}/10 RCs used today>"
+        status = "PRO" if self.is_pro else "FREE"
+        return f"<User {self.tg_id} ({status}) - {self.weekly_requests}/5 RCs used this week>"

@@ -60,27 +60,37 @@ async def on_startup(bot: Bot):
     # Create base tables
     await init_db()
 
-    # --- AUTO-MIGRATION LOGIC ---
+    # --- AUTO-MIGRATION LOGIC (REVISED FOR WEEKLY LIMITS) ---
     async with AsyncSessionLocal() as session:
         try:
             logger.info("Synchronizing database columns... ⚙️")
+            
+            # Add weekly_requests if it doesn't exist
             await session.execute(text(
-                "ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_requests INTEGER DEFAULT 0;"
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS weekly_requests INTEGER DEFAULT 0;"
             ))
+            
+            # Ensure last_request_date exists (used for the 7-day reset)
             await session.execute(text(
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_request_date DATE DEFAULT CURRENT_DATE;"
             ))
+            
+            # Optional: Keep daily_requests column for legacy data, but we won't use it
+            await session.execute(text(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_requests INTEGER DEFAULT 0;"
+            ))
+            
             await session.commit()
             logger.info("✅ Database columns synchronized successfully!")
         except Exception as e:
             await session.rollback()
-            logger.warning("Database sync note: %s", e)
+            logger.warning("Database sync note (might already be up to date): %s", e)
 
     # Background tasks
     asyncio.create_task(clear_media_tracker_periodic())
     asyncio.create_task(cleanup_temp_files())
 
-    logger.info("Alice is fully awake. 💅")
+    logger.info("Alice is fully awake and enforcing weekly limits. 💅")
 
 
 async def main():
@@ -97,8 +107,8 @@ async def main():
     dp.message.middleware(ThrottlingMiddleware())
     dp.message.middleware(SubscriptionMiddleware())
 
-    # Routers order matters:
-    # chat BEFORE processor so text goes to chat, PDFs go to processor.
+    # Routers order:
+    # admin/billing/start first, then chat, then heavy processor
     dp.include_router(admin.router)
     dp.include_router(start.router)
     dp.include_router(settings.router)
