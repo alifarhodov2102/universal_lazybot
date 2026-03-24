@@ -18,6 +18,19 @@ router = Router()
 # Updated Constant to match processor and billing 💅
 FREE_WEEKLY_LIMIT = 5
 
+# ================= PRIVACY POLICY TEXT =================
+PRIVACY_TEXT = (
+    "🔒 <b>Lazy Alice Privacy & Data Policy</b>\n\n"
+    "1. <b>No Data Retention:</b> We do not store the content of your Rate Confirmations. "
+    "Once the text is extracted and sent to you, the information is cleared from our active memory.\n\n"
+    "2. <b>Auto-Deletion:</b> PDF files are temporarily stored and <b>automatically deleted every 24 hours</b> "
+    "to ensure your broker and rate info remains private.\n\n"
+    "3. <b>Security:</b> Your load data is never sold or shared. Your Telegram ID is used only for "
+    "subscription tracking and weekly limits.\n\n"
+    "4. <b>AI Processing:</b> We use DeepSeek AI for analysis; however, no data is used to train AI models.\n\n"
+    "<i>By using Alice, you agree to these safe and lazy terms.</i> 💅🥱"
+)
+
 # ================= START =================
 
 @router.message(CommandStart())
@@ -66,7 +79,6 @@ async def cmd_start(message: types.Message):
                 # Calculate weekly reset logic for visual accuracy
                 days_since_reset = (today - user.last_request_date).days
                 if days_since_reset >= 7:
-                    # If it's a new week, show them their full potential 💅
                     left = FREE_WEEKLY_LIMIT
                 else:
                     left = max(0, FREE_WEEKLY_LIMIT - user.weekly_requests)
@@ -79,7 +91,26 @@ async def cmd_start(message: types.Message):
                 "Ready to work? Just drop the <b>PDF</b> here. 🥱"
             )
 
-        await status_msg.edit_text(welcome_text, parse_mode=ParseMode.HTML)
+        # Add Privacy Button to welcome message
+        builder = InlineKeyboardBuilder()
+        builder.row(types.InlineKeyboardButton(text="🔒 Privacy Policy", callback_data="view_privacy"))
+
+        await status_msg.edit_text(
+            welcome_text, 
+            reply_markup=builder.as_markup(), 
+            parse_mode=ParseMode.HTML
+        )
+
+@router.callback_query(F.data == "view_privacy")
+async def callback_privacy(callback: types.CallbackQuery):
+    """Alice explains her secrets via button 💅"""
+    await callback.message.answer(PRIVACY_TEXT, parse_mode=ParseMode.HTML)
+    await callback.answer()
+
+@router.message(Command("privacy"))
+async def cmd_privacy(message: types.Message):
+    """Direct command for the curious 🥱"""
+    await message.answer(PRIVACY_TEXT, parse_mode=ParseMode.HTML)
 
 
 # ================= TEMPLATE MANAGEMENT =================
@@ -205,7 +236,8 @@ async def cmd_help(message: types.Message):
         "❓ <b>Need help?</b>\n\n"
         "• Send a PDF (not a photo).\n"
         "• Use /set_template for custom format.\n"
-        f"• Weekly limit: {FREE_WEEKLY_LIMIT} free extractions.\n\n"
+        f"• Weekly limit: {FREE_WEEKLY_LIMIT} free extractions.\n"
+        "• Use /privacy to see our data safety rules.\n\n"
         "Support: @lazyalice_admin"
     )
 
