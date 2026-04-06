@@ -27,9 +27,9 @@ user_workers: Dict[int, asyncio.Task] = {}
 media_group_tracker: Dict[str, int] = {}
 
 MEDIA_GROUP_LIMIT = 5
-FREE_WEEKLY_LIMIT = 5  # 💅 Lowered from 10/day to 5/week to boost sales
 
-GLOBAL_PROCESS_SEM = asyncio.Semaphore(2)
+# Semaphores to keep Railway RAM usage stable 💅
+GLOBAL_PROCESS_SEM = asyncio.Semaphore(1)  # Only 1 OCR/AI task at a time to prevent RAM spikes
 TG_SEND_SEM = asyncio.Semaphore(1)
 
 
@@ -87,53 +87,34 @@ async def safe_delete(bot: Bot, chat_id: int, message_id: int):
         return None
 
 
-# ================= LIMIT CHECK (WEEKLY LOGIC) =================
-async def check_and_update_limit(uid: int) -> tuple[bool, int]:
+# ================= ACCESS CHECK (PAID ONLY MODE) =================
+async def check_is_paid_user(uid: int) -> bool:
     """
-    Returns: (allowed, left)
-    Uses a 7-day rolling window for free users.
+    Strictly checks if the user is an Admin or has an active Pro sub.
+    No free trials allowed. 🔒💅
     """
     async with AsyncSessionLocal() as session:
         res = await session.execute(select(User).where(User.tg_id == uid))
         user = res.scalar_one_or_none()
-        if not user:
-            return False, 0
-
-        is_admin = uid in ADMIN_IDS
-        now = datetime.utcnow()
-
-        # 1. Pro Check
-        is_pro_active = False
-        if user.is_pro:
-            expiry = user.expiry_date
-            if expiry is None:
-                is_pro_active = True
-            else:
-                if getattr(expiry, "tzinfo", None):
-                    expiry = expiry.replace(tzinfo=None)
-                is_pro_active = expiry > now
-
-        if is_admin or is_pro_active:
-            return True, 999
-
-        # 2. Weekly Reset Logic ⏱️
-        today = date.today()
-        # If it has been 7 or more days since the start of their last cycle, reset
-        if (today - user.last_request_date).days >= 7:
-            user.weekly_requests = 0
-            user.last_request_date = today
-            await session.commit()
-
-        # 3. Limit Check
-        if user.weekly_requests >= FREE_WEEKLY_LIMIT:
-            return False, 0
-
-        # 4. Increment usage
-        user.weekly_requests += 1
-        await session.commit()
         
-        left = max(0, FREE_WEEKLY_LIMIT - user.weekly_requests)
-        return True, left
+        if not user:
+            return False
+
+        # 1. Admin bypass
+        if uid in ADMIN_IDS:
+            return True
+
+        # 2. Pro Status Check
+        now = datetime.utcnow()
+        if user.is_pro and user.expiry_date:
+            expiry = user.expiry_date
+            if getattr(expiry, "tzinfo", None):
+                expiry = expiry.replace(tzinfo=None)
+            
+            if expiry > now:
+                return True
+
+        return False
 
 
 # ================= WORKER =================
@@ -226,14 +207,14 @@ async def handle_pdf(message: types.Message, bot: Bot):
     uid = message.from_user.id
     mg_id = message.media_group_id
 
-    allowed, left = await check_and_update_limit(uid)
-    if not allowed:
-        # 💅 Sassy business-focused rejection
+    # 🛑 THE GATEKEEPER: Check for Pro Status first
+    is_allowed = await check_is_paid_user(uid)
+    if not is_allowed:
         return await message.answer(
-            "💸 <b>Weekly limit reached!</b>\n\n"
-            "You only get 5 free RCs per week. "
-            "Upgrade to <b>Pro</b> for unlimited access and beat the competition. 🥱💅\n\n"
-            "Use /plans to see details.", 
+            "🔒 <b>Premium Access Only</b>\n\n"
+            "Alice has entered <b>Fully Paid Mode</b>. Free trials are no longer available. "
+            "To process Rate Confirmations, please subscribe to a Pro plan. 💅\n\n"
+            "Use /plans to get instant access.", 
             parse_mode=ParseMode.HTML
         )
 
@@ -249,8 +230,7 @@ async def handle_pdf(message: types.Message, bot: Bot):
     user_queues.setdefault(uid, asyncio.Queue())
     pos = user_queues[uid].qsize()
 
-    left_text = "Unlimited" if left == 999 else f"{left} left this week"
-    status_text = f"👀 <b>Queued</b> ({left_text})"
+    status_text = "👀 <b>Queued (Pro Access)</b>"
     if pos > 0:
         status_text += f"\n📥 <i>Queue position: {pos + 1}</i>"
 
