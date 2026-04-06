@@ -12,34 +12,35 @@ router = Router()
 
 @router.message(Command("plans"))
 async def show_plans(message: types.Message):
-    """Alice presents the toll for her premium services 💅"""
-    # 1. Info message for Fully Paid Mode
+    """Alice presents the new budget-friendly toll with FULL POWER 💸💅"""
+    # 1. Info message for the new $3 / 150 Stars Plan
     plan_details = (
         "✨ <b>Alice's Premium Access</b> ✨\n\n"
-        "💰 <b>Price:</b> 250 Stars OR <b>$5</b> / month\n\n"
-        "✅ <b>Unlimited</b> RC extractions (No caps)\n"
+        "💰 <b>Price:</b> 150 Stars OR <b>$3</b> / month\n\n"
+        "✅ <b>Unlimited</b> RC extractions (No limits)\n"
         "✅ AI-Learned Custom Templates\n"
-        "✅ Full OCR & Priority AI processing\n\n"
+        "✅ <b>Full OCR</b> (Alice reads images & scans)\n"
+        "✅ Priority AI Analysis\n\n"
         "💳 <b>Manual Card Payment (Visa):</b>\n"
         "<code>4231200092181873</code> (Click to copy)\n\n"
-        "👤 <b>Name on card:</b> Ali Farhodov (Alice's Creator 👨‍💻)\n\n"
+        "👤 <b>Name on card:</b> Ali Farhodov 👨‍💻\n\n"
         "🎀 <b>Customer Support:</b> Alice (Female Admin 💅)\n"
         "⚠️ <i>Send the receipt to @lazyalice_admin after paying for manual activation.</i>"
     )
     
     await message.answer(plan_details, parse_mode="HTML")
 
-    # 2. Automated invoice for Telegram Stars
-    prices = [LabeledPrice(label="Pro Plan (30 days)", amount=250)]
+    # 2. Automated invoice for Telegram Stars (Updated to 150)
+    prices = [LabeledPrice(label="Pro Plan (30 days)", amount=150)]
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✨ Pay with 250 Stars", pay=True)],
+        [InlineKeyboardButton(text="✨ Pay with 150 Stars", pay=True)],
         [InlineKeyboardButton(text="📩 Send Receipt to Admin", url="https://t.me/lazyalice_admin")]
     ])
 
     await message.answer_invoice(
         title="Lazy Alice Pro Access",
-        description="Instant activation for 30 days of unlimited use.",
+        description="Instant activation for 30 days of premium power.",
         payload="pro_sub_30d",
         provider_token="", # Empty for Stars
         currency="XTR",
@@ -72,7 +73,7 @@ async def on_successful_payment(message: types.Message):
 
     success_text = (
         "❤️ <b>Alice is impressed!</b> ❤️\n\n"
-        "Your automated payment was successful. Pro status is active.\n"
+        "Your payment was successful. Pro status is active.\n"
         "Valid until: <b>" + expire_at.strftime('%d.%m.%Y') + "</b> 💅"
     )
     await message.answer(success_text, parse_mode="HTML")
@@ -92,6 +93,8 @@ async def check_status(message: types.Message):
         # 1. Check if Pro has expired
         now = datetime.utcnow()
         expiry = user.expiry_date
+        
+        # Safe timezone handling for comparison
         if expiry and getattr(expiry, "tzinfo", None):
             expiry = expiry.replace(tzinfo=None)
 
