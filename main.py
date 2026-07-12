@@ -1,7 +1,5 @@
 import asyncio
 import logging
-import os
-import time
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -9,127 +7,279 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from sqlalchemy import text
 
-from config import BOT_TOKEN
+from config import (
+    BOT_TOKEN,
+    DATABASE_URL,
+    MAX_CONCURRENT_JOBS,
+    MAX_CONCURRENT_OCR,
+    MAX_CONCURRENT_AI,
+)
 from database.connection import init_db, AsyncSessionLocal
-from handlers import admin, start, settings, billing, chat, processor
-from utils.middlewares import SubscriptionMiddleware, ThrottlingMiddleware
+from handlers import (
+    admin,
+    billing,
+    start,
+    settings,
+    chat,
+    processor,
+)
+from utils.middlewares import (
+    SubscriptionMiddleware,
+    ThrottlingMiddleware,
+)
 
-# Only what we actually use from processor
-from handlers.processor import media_group_tracker
 
-# 1. Configure logging
+# ============================================================
+# Logging
+# ============================================================
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format=(
+        "%(asctime)s - %(name)s - "
+        "%(levelname)s - %(message)s"
+    ),
 )
+
 logger = logging.getLogger("LazyAlice")
 
 
-async def clear_media_tracker_periodic():
-    """Clears media group counters so memory doesn't grow forever."""
-    while True:
-        await asyncio.sleep(3600)  # every hour
-        media_group_tracker.clear()
-        logger.info("🧹 Media group tracker cleared.")
+# ============================================================
+# Database synchronization
+# ============================================================
 
+async def synchronize_database_columns() -> None:
+    """
+    Keep compatibility with databases created by older versions.
 
-async def cleanup_temp_files():
-    """Deletes PDFs older than 24h inside ./temp (runs every 12h)."""
-    while True:
-        now = time.time()
-        temp_dir = "temp"
-        if os.path.exists(temp_dir):
-            for f in os.listdir(temp_dir):
-                f_path = os.path.join(temp_dir, f)
-                try:
-                    if os.stat(f_path).st_mtime < now - 86400:
-                        os.remove(f_path)
-                        logger.info("🗑️ Deleted old temp file: %s", f)
-                except Exception as e:
-                    logger.warning("Temp cleanup failed for %s: %s", f, e)
-
-        await asyncio.sleep(43200)  # 12 hours
-
-
-async def on_startup(bot: Bot):
-    logger.info("Waking up Alice's memory... 🧠")
-
-    # Ensure temporary storage exists for PDFs
-    os.makedirs("temp", exist_ok=True)
-
-    # Create base tables
-    await init_db()
-
-    # --- AUTO-MIGRATION LOGIC (REVISED FOR WEEKLY LIMITS) ---
+    This is a temporary migration system. For larger future database
+    changes, Alembic migrations should be used.
+    """
     async with AsyncSessionLocal() as session:
         try:
-            logger.info("Synchronizing database columns... ⚙️")
-            
-            # Add weekly_requests if it doesn't exist
-            await session.execute(text(
-                "ALTER TABLE users ADD COLUMN IF NOT EXISTS weekly_requests INTEGER DEFAULT 0;"
-            ))
-            
-            # Ensure last_request_date exists (used for the 7-day reset)
-            await session.execute(text(
-                "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_request_date DATE DEFAULT CURRENT_DATE;"
-            ))
-            
-            # Optional: Keep daily_requests column for legacy data, but we won't use it
-            await session.execute(text(
-                "ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_requests INTEGER DEFAULT 0;"
-            ))
-            
-            await session.commit()
-            logger.info("✅ Database columns synchronized successfully!")
-        except Exception as e:
+            dialect_name = (
+                session.bind.dialect.name
+                if session.bind
+                else "unknown"
+            )
+
+            logger.info(
+                "Database dialect: %s",
+                dialect_name,
+            )
+
+            # PostgreSQL supports ADD COLUMN IF NOT EXISTS.
+            if dialect_name == "postgresql":
+                await session.execute(
+                    text(
+                        """
+                        ALTER TABLE users
+                        ADD COLUMN IF NOT EXISTS
+                        weekly_requests INTEGER DEFAULT 0;
+                        """
+                    )
+                )
+
+                await session.execute(
+                    text(
+                        """
+                        ALTER TABLE users
+                        ADD COLUMN IF NOT EXISTS
+                        last_request_date DATE DEFAULT CURRENT_DATE;
+                        """
+                    )
+                )
+
+                await session.execute(
+                    text(
+                        """
+                        ALTER TABLE users
+                        ADD COLUMN IF NOT EXISTS
+                        daily_requests INTEGER DEFAULT 0;
+                        """
+                    )
+                )
+
+                await session.commit()
+
+                logger.info(
+                    "Database columns synchronized successfully."
+                )
+
+            else:
+                # init_db() already creates all columns for a new
+                # SQLite database. The PostgreSQL migration syntax
+                # is intentionally not executed on SQLite.
+                logger.info(
+                    "Automatic legacy column migration skipped "
+                    "for database dialect %s.",
+                    dialect_name,
+                )
+
+        except Exception:
             await session.rollback()
-            logger.warning("Database sync note (might already be up to date): %s", e)
 
-    # Background tasks
-    asyncio.create_task(clear_media_tracker_periodic())
-    asyncio.create_task(cleanup_temp_files())
-
-    logger.info("Alice is fully awake and enforcing weekly limits. 💅")
+            logger.exception(
+                "Database column synchronization failed."
+            )
 
 
-async def main():
-    bot = Bot(
-        token=BOT_TOKEN,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+# ============================================================
+# Startup and shutdown
+# ============================================================
+
+async def on_startup(bot: Bot) -> None:
+    logger.info("Starting Lazy Alice.")
+
+    await init_db()
+    await synchronize_database_columns()
+
+    database_type = (
+        "PostgreSQL"
+        if "postgresql" in DATABASE_URL
+        else "SQLite"
     )
 
-    dp = Dispatcher(storage=MemoryStorage())
+    logger.info(
+        "Database backend: %s",
+        database_type,
+    )
 
-    dp.startup.register(on_startup)
+    logger.info(
+        "Processing limits: jobs=%s, OCR=%s, AI=%s",
+        MAX_CONCURRENT_JOBS,
+        MAX_CONCURRENT_OCR,
+        MAX_CONCURRENT_AI,
+    )
 
+    bot_info = await bot.get_me()
+
+    logger.info(
+        "Bot connected successfully: @%s (%s)",
+        bot_info.username,
+        bot_info.id,
+    )
+
+    logger.info("Lazy Alice is ready.")
+
+
+async def on_shutdown(bot: Bot) -> None:
+    logger.info("Lazy Alice is shutting down.")
+
+
+# ============================================================
+# Main application
+# ============================================================
+
+async def main() -> None:
+    bot = Bot(
+        token=BOT_TOKEN,
+        default=DefaultBotProperties(
+            parse_mode=ParseMode.HTML,
+        ),
+    )
+
+    dispatcher = Dispatcher(
+        storage=MemoryStorage(),
+    )
+
+    dispatcher.startup.register(
+        on_startup
+    )
+
+    dispatcher.shutdown.register(
+        on_shutdown
+    )
+
+    # --------------------------------------------------------
     # Middlewares
-    dp.message.middleware(ThrottlingMiddleware())
-    dp.message.middleware(SubscriptionMiddleware())
+    # --------------------------------------------------------
 
-    # Routers order:
-    # admin/billing/start first, then chat, then heavy processor
-    dp.include_router(admin.router)
-    dp.include_router(start.router)
-    dp.include_router(settings.router)
-    dp.include_router(billing.router)
-    dp.include_router(chat.router)
-    dp.include_router(processor.router)
+    dispatcher.message.middleware(
+        ThrottlingMiddleware()
+    )
 
-    logger.info("🚀 Lazy Alice is ONLINE!")
+    dispatcher.message.middleware(
+        SubscriptionMiddleware()
+    )
+
+    # --------------------------------------------------------
+    # Routers
+    # --------------------------------------------------------
+
+    # Payment handlers are placed early, although middleware still
+    # executes before routers. We must check middlewares next to make
+    # sure successful_payment updates are never blocked.
+    dispatcher.include_router(
+        admin.router
+    )
+
+    dispatcher.include_router(
+        billing.router
+    )
+
+    dispatcher.include_router(
+        start.router
+    )
+
+    dispatcher.include_router(
+        settings.router
+    )
+
+    dispatcher.include_router(
+        chat.router
+    )
+
+    dispatcher.include_router(
+        processor.router
+    )
+
+    logger.info(
+        "Starting Telegram long polling."
+    )
 
     try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        await dp.start_polling(bot)
-    except Exception as e:
-        logger.error("Polling error: %s", e)
+        # Preserve pending updates. This is important for payment
+        # confirmations that arrived while Railway was restarting.
+        await bot.delete_webhook(
+            drop_pending_updates=False
+        )
+
+        await dispatcher.start_polling(
+            bot,
+            allowed_updates=(
+                dispatcher.resolve_used_update_types()
+            ),
+        )
+
+    except asyncio.CancelledError:
+        logger.info(
+            "Telegram polling was cancelled."
+        )
+        raise
+
+    except Exception:
+        logger.exception(
+            "Telegram polling stopped because of an error."
+        )
+
+        raise
+
     finally:
         await bot.session.close()
-        logger.info("Alice is going back to sleep. 🥱💤")
+
+        logger.info(
+            "Telegram bot session closed."
+        )
 
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        asyncio.run(
+            main()
+        )
+
     except (KeyboardInterrupt, SystemExit):
-        pass
+        logger.info(
+            "Bot stopped manually."
+        )
