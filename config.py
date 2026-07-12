@@ -1,39 +1,145 @@
 import os
 from dotenv import load_dotenv
 
-# .env faylidagi o'zgaruvchilarni yuklash
+# Load variables from the local .env file.
+# On Railway, variables are loaded from the Railway Variables section.
 load_dotenv()
 
-# Telegram Bot sozlamalari
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN .env not found!")
 
-# DeepSeek API sozlamalari
+def get_positive_int(name: str, default: int) -> int:
+    """
+    Read a positive integer from environment variables.
+
+    Invalid, zero, or negative values fall back to the default.
+    """
+    raw_value = os.getenv(name, str(default))
+
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        print(
+            f"Warning: {name}={raw_value!r} is invalid. "
+            f"Using default value {default}."
+        )
+        return default
+
+    if value < 1:
+        print(
+            f"Warning: {name} must be at least 1. "
+            f"Using default value {default}."
+        )
+        return default
+
+    return value
+
+
+# ============================================================
+# Telegram Bot
+# ============================================================
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN was not found in environment variables!")
+
+
+# ============================================================
+# DeepSeek API
+# ============================================================
+
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-# DeepSeek API uchun asosiy URL manzili
-DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
+DEEPSEEK_URL = os.getenv(
+    "DEEPSEEK_URL",
+    "https://api.deepseek.com/v1/chat/completions",
+)
 
 if not DEEPSEEK_API_KEY:
-    # Agarda DeepSeek bo'lmasa bot ishlayverishi mumkin, 
-    # lekin extraction sifatiga ta'sir qiladi
-    print("Warning: DEEPSEEK_API_KEY not found. AI extraction might not work.")
+    print(
+        "Warning: DEEPSEEK_API_KEY was not found. "
+        "AI extraction will not work."
+    )
 
-# Ma'lumotlar bazasi sozlamalari
-# Railway-da agar Postgres ulasangiz, DATABASE_URL avtomatik beriladi
+
+# ============================================================
+# Database
+# ============================================================
+
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:
-    # Lokal ishlab chiqish uchun SQLite
+    # Local development fallback.
     DATABASE_URL = "sqlite+aiosqlite:///./bot_database.db"
+
+    print(
+        "Warning: DATABASE_URL was not found. "
+        "Using local SQLite database."
+    )
+
 elif DATABASE_URL.startswith("postgres://"):
-    # SQLAlchemy uchun postgres:// ni postgresql+asyncpg:// ga aylantirish kerak
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
+    DATABASE_URL = DATABASE_URL.replace(
+        "postgres://",
+        "postgresql+asyncpg://",
+        1,
+    )
 
-# To'lov sozlamalari (Stars uchun)
-# Stars uchun provider token bo'sh bo'ladi
-PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN", "")
+elif DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace(
+        "postgresql://",
+        "postgresql+asyncpg://",
+        1,
+    )
 
-# Admin ID-lar (Xatoliklar yoki statistikani ko'rish uchun)
-# .env faylida: ADMIN_IDS=1234567,8901234 ko'rinishida yoziladi
-ADMIN_IDS = [int(admin_id) for admin_id in os.getenv("ADMIN_IDS", "").split(",") if admin_id]
+
+# ============================================================
+# Concurrent processing limits
+# ============================================================
+
+# Maximum number of PDF jobs processed simultaneously.
+MAX_CONCURRENT_JOBS = get_positive_int(
+    "MAX_CONCURRENT_JOBS",
+    3,
+)
+
+# OCR is CPU- and memory-intensive, so keep this lower.
+MAX_CONCURRENT_OCR = get_positive_int(
+    "MAX_CONCURRENT_OCR",
+    1,
+)
+
+# Maximum number of simultaneous DeepSeek requests.
+MAX_CONCURRENT_AI = get_positive_int(
+    "MAX_CONCURRENT_AI",
+    4,
+)
+
+
+# ============================================================
+# Payments
+# ============================================================
+
+# Telegram Stars uses an empty provider token.
+PAYMENT_PROVIDER_TOKEN = os.getenv(
+    "PAYMENT_PROVIDER_TOKEN",
+    "",
+)
+
+
+# ============================================================
+# Administrators
+# ============================================================
+
+ADMIN_IDS = []
+
+for raw_admin_id in os.getenv("ADMIN_IDS", "").split(","):
+    raw_admin_id = raw_admin_id.strip()
+
+    if not raw_admin_id:
+        continue
+
+    try:
+        ADMIN_IDS.append(int(raw_admin_id))
+    except ValueError:
+        print(
+            f"Warning: Invalid ADMIN_IDS value ignored: "
+            f"{raw_admin_id!r}"
+        )
