@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import re
+from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
 import httpx
@@ -894,6 +895,206 @@ RATE CONFIRMATION TEXT:
     return None
 
 
+
+# ============================================================
+# Missing-stop fallback for Hwy Haul-style PDFs
+# ============================================================
+
+STOP_SECTION_RE = re.compile(
+    r"(?im)^\s*(Pickup|Dropoff)\s*$"
+)
+
+STOP_END_RE = re.compile(
+    r"(?im)^\s*(?:Pickup|Dropoff|Policies\s*&\s*Agreement)\s*$"
+)
+
+ADDRESS_TWO_LINE_RE = re.compile(
+    r"(?P<street>\d{1,6}\s+[^\n]+?)\s*,?\s*\n"
+    r"(?P<city>[A-Za-z0-9 .'\-]+,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?)",
+    re.IGNORECASE,
+)
+
+ADDRESS_ONE_LINE_RE = re.compile(
+    r"(?P<full>"
+    r"\d{1,6}\s+[^,\n]+,\s*"
+    r"[A-Za-z0-9 .'\-]+,\s*"
+    r"[A-Z]{2}\s+\d{5}(?:-\d{4})?"
+    r")",
+    re.IGNORECASE,
+)
+
+APPOINTMENT_RE = re.compile(
+    r"Appointment\s+Date\s*&\s*Time\s*"
+    r"(?:\n|\s)+"
+    r"(?P<date>[A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})"
+    r"\s+at\s+"
+    r"(?P<time>\d{1,2}:\d{2})",
+    re.IGNORECASE,
+)
+
+
+def _format_appointment_datetime(
+    date_value: str,
+    time_value: str,
+) -> str:
+    """
+    Convert 'Oct 25, 2024' into '10/25/2024'.
+
+    If parsing fails, preserve the text instead of guessing.
+    """
+    try:
+        parsed_date = datetime.strptime(
+            date_value.strip(),
+            "%b %d, %Y",
+        )
+
+        return (
+            f"{parsed_date.strftime('%m/%d/%Y')} "
+            f"{time_value.strip()}"
+        )
+
+    except ValueError:
+        return (
+            f"{date_value.strip()} "
+            f"{time_value.strip()}"
+        )
+
+
+def _extract_stop_from_section(
+    section_text: str,
+) -> Optional[Dict[str, str]]:
+    """
+    Extract one facility, address, and appointment from a labeled
+    Pickup or Dropoff section.
+    """
+    lines = [
+        line.strip()
+        for line in section_text.splitlines()
+        if line.strip()
+    ]
+
+    if not lines:
+        return None
+
+    # In Hwy Haul PDFs, the first non-empty line after the heading
+    # is the facility name.
+    facility = lines[0]
+
+    address = ""
+
+    two_line_address = ADDRESS_TWO_LINE_RE.search(
+        section_text
+    )
+
+    if two_line_address:
+        street = (
+            two_line_address.group("street")
+            .strip()
+            .rstrip(",")
+        )
+
+        city = (
+            two_line_address.group("city")
+            .strip()
+        )
+
+        address = f"{street}, {city}"
+
+    else:
+        one_line_address = ADDRESS_ONE_LINE_RE.search(
+            section_text
+        )
+
+        if one_line_address:
+            address = (
+                one_line_address.group("full")
+                .strip()
+            )
+
+    appointment = ""
+
+    appointment_match = APPOINTMENT_RE.search(
+        section_text
+    )
+
+    if appointment_match:
+        appointment = _format_appointment_datetime(
+            appointment_match.group("date"),
+            appointment_match.group("time"),
+        )
+
+    # Do not create a useless stop when the section did not
+    # contain any actual location information.
+    if not facility and not address:
+        return None
+
+    return {
+        "facility": facility or "N/A",
+        "address": address,
+        "time": appointment,
+    }
+
+
+def extract_hwyhaul_stops_fallback(
+    text: str,
+) -> Dict[str, list]:
+    """
+    Recover pickup and dropoff data from Hwy Haul-style PDFs.
+
+    This runs only as a backup. Valid AI stops are never overwritten.
+    It supports multiple Pickup and Dropoff sections when present.
+    """
+    result = {
+        "pickups": [],
+        "deliveries": [],
+    }
+
+    normalized_text = (
+        str(text)
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+    )
+
+    section_matches = list(
+        STOP_SECTION_RE.finditer(normalized_text)
+    )
+
+    for index, match in enumerate(section_matches):
+        stop_type = match.group(1).lower()
+        section_start = match.end()
+
+        if index + 1 < len(section_matches):
+            section_end = section_matches[index + 1].start()
+        else:
+            trailing_end = STOP_END_RE.search(
+                normalized_text,
+                section_start,
+            )
+
+            section_end = (
+                trailing_end.start()
+                if trailing_end
+                else len(normalized_text)
+            )
+
+        section_text = normalized_text[
+            section_start:section_end
+        ].strip()
+
+        stop = _extract_stop_from_section(
+            section_text
+        )
+
+        if not stop:
+            continue
+
+        if stop_type == "pickup":
+            result["pickups"].append(stop)
+        else:
+            result["deliveries"].append(stop)
+
+    return result
+
 # ============================================================
 # Main pipeline
 # ============================================================
@@ -908,6 +1109,33 @@ async def smart_extract(
     data = apply_defaults(
         await deepseek_ai_extract(text)
     )
+
+
+    # Deterministic stop fallback for Hwy Haul-style documents.
+    # It only fills a missing side and never overwrites valid AI stops.
+    fallback_stops = extract_hwyhaul_stops_fallback(text)
+
+    if (
+        not data.get("pickups")
+        and fallback_stops["pickups"]
+    ):
+        data["pickups"] = fallback_stops["pickups"]
+
+        logger.info(
+            "Recovered %s pickup stop(s) with deterministic fallback.",
+            len(fallback_stops["pickups"]),
+        )
+
+    if (
+        not data.get("deliveries")
+        and fallback_stops["deliveries"]
+    ):
+        data["deliveries"] = fallback_stops["deliveries"]
+
+        logger.info(
+            "Recovered %s delivery stop(s) with deterministic fallback.",
+            len(fallback_stops["deliveries"]),
+        )
 
     # Load number fallback
     load_match = LOAD_RE.search(text)
