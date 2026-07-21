@@ -55,6 +55,7 @@ def _is_missing(value: Any) -> bool:
         "unknown",
         "not stated",
         "0",
+        "0.0",
         "0.00",
     }
 
@@ -65,9 +66,6 @@ def _safe_text(
 ) -> str:
     """
     Escape extracted PDF text before inserting it into Telegram HTML.
-
-    This prevents names and addresses containing characters such as
-    <, >, and & from breaking the Telegram message.
     """
     if _is_missing(value):
         return default
@@ -80,8 +78,8 @@ def _safe_text(
 
 def _parse_number(value: Any) -> Optional[float]:
     """
-    Convert values such as '$2,500.00', '450 mi', or '40,000 lbs'
-    into a float.
+    Convert values such as '$2,500.00', '1,858 mi',
+    or '70,000 lbs' into a float.
     """
     if value is None:
         return None
@@ -101,6 +99,39 @@ def _parse_number(value: Any) -> Optional[float]:
 
     except (TypeError, ValueError):
         return None
+
+
+def _format_weight(value: Any) -> str:
+    """
+    Format an explicitly extracted shipment weight.
+
+    The extraction pipeline is expected to return pounds. If another
+    unit is explicitly present, preserve the original value rather
+    than converting or guessing.
+    """
+    if _is_missing(value):
+        return "N/A"
+
+    raw_value = str(value).strip()
+    normalized = raw_value.lower()
+
+    if re.search(
+        r"\b(?:kg|kgs|kilogram|kilograms)\b",
+        normalized,
+    ):
+        return _safe_text(raw_value)
+
+    weight_float = _parse_number(raw_value)
+
+    if weight_float is None or weight_float <= 0:
+        return _safe_text(raw_value)
+
+    if weight_float.is_integer():
+        number_display = f"{weight_float:,.0f}"
+    else:
+        number_display = f"{weight_float:,.1f}"
+
+    return f"{number_display} lbs"
 
 
 # ============================================================
@@ -149,9 +180,9 @@ def _format_address(address: Any) -> str:
         display_address = unique_parts[0]
 
     return (
-        f"<code>"
+        "<code>"
         f"{html.escape(display_address, quote=False)}"
-        f"</code>"
+        "</code>"
     )
 
 
@@ -272,8 +303,6 @@ def _build_temperature_info(
 ) -> str:
     """
     Build the reefer temperature section.
-
-    All values are already escaped for Telegram HTML.
     """
     lines = []
 
@@ -293,6 +322,189 @@ def _build_temperature_info(
         )
 
     return "\n".join(lines)
+
+
+# ============================================================
+# Custom-template normalization
+# ============================================================
+
+def _normalize_template(
+    template_string: str,
+) -> str:
+    """
+    Repair common mistakes produced by learned custom templates.
+
+    Examples:
+
+    RATE: ${{ rate }}
+    becomes:
+    RATE: {{ rate }}
+
+    TOTAL MILES: {{ total_miles }} mi
+    becomes:
+    TOTAL MILES: {{ total_miles }}
+
+    WEIGHT: {{ weight }} lbs
+    becomes:
+    WEIGHT: {{ weight }}
+
+    WEIGHT:
+    becomes:
+    WEIGHT: {{ weight }}
+    """
+    normalized = str(template_string)
+
+    # The renderer already formats the rate with "$".
+    normalized = re.sub(
+        r"\$\s*\{\{\s*rate\s*\}\}",
+        "{{ rate }}",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+
+    # The renderer already adds mileage units.
+    normalized = re.sub(
+        r"\{\{\s*total_miles\s*\}\}\s*"
+        r"(?:mi|mile|miles)\b",
+        "{{ total_miles }}",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+
+    # The renderer already adds weight units.
+    normalized = re.sub(
+        r"\{\{\s*weight\s*\}\}\s*"
+        r"(?:lb|lbs|pound|pounds)\b",
+        "{{ weight }}",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+
+    # The renderer already formats per-mile as "$X.XX/mi".
+    normalized = re.sub(
+        r"\{\{\s*per_mile\s*\}\}\s*/?\s*mi\b",
+        "{{ per_mile }}",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+
+    # Repair blank WEIGHT lines.
+    normalized = re.sub(
+        r"(?im)^("
+        r"\s*(?:<b>)?\s*"
+        r"WEIGHT"
+        r"\s*(?:</b>)?\s*:"
+        r")\s*$",
+        r"\1 {{ weight }}",
+        normalized,
+    )
+
+    # Repair blank TOTAL MILE / TOTAL MILES lines.
+    normalized = re.sub(
+        r"(?im)^("
+        r"\s*(?:<b>)?\s*"
+        r"TOTAL\s+MILES?"
+        r"\s*(?:</b>)?\s*:"
+        r")\s*$",
+        r"\1 {{ total_miles }}",
+        normalized,
+    )
+
+    # Repair blank RATE lines.
+    normalized = re.sub(
+        r"(?im)^("
+        r"\s*(?:<b>)?\s*"
+        r"RATE"
+        r"\s*(?:</b>)?\s*:"
+        r")\s*$",
+        r"\1 {{ rate }}",
+        normalized,
+    )
+
+    # Repair blank PER MILE lines.
+    normalized = re.sub(
+        r"(?im)^("
+        r"\s*(?:<b>)?\s*"
+        r"PER\s+MILE"
+        r"\s*(?:</b>)?\s*:"
+        r")\s*$",
+        r"\1 {{ per_mile }}",
+        normalized,
+    )
+
+    # Repair blank DURATION lines.
+    normalized = re.sub(
+        r"(?im)^("
+        r"\s*(?:<b>)?\s*"
+        r"DURATION"
+        r"\s*(?:</b>)?\s*:"
+        r")\s*$",
+        r"\1 {{ duration }}",
+        normalized,
+    )
+
+    return normalized
+
+
+def _remove_empty_temperature_block(
+    rendered_text: str,
+) -> str:
+    """
+    Remove old custom-template temperature blocks when the load has
+    no actual temperature information.
+
+    This cleans templates previously saved in the database that
+    unconditionally print N/A reefer fields.
+    """
+    lines = rendered_text.splitlines()
+    cleaned_lines = []
+    index = 0
+
+    heading_pattern = re.compile(
+        r"^\s*(?:🌡\s*)?"
+        r"(?:reefer|temp(?:erature)?)"
+        r"(?:\s+info(?:rmation)?)?"
+        r"\s*:\s*$",
+        re.IGNORECASE,
+    )
+
+    field_pattern = re.compile(
+        r"^\s*"
+        r"(?:temperature\s*)?"
+        r"(?:set|mode|notes?|info)"
+        r"\s*:\s*"
+        r"(?:N/A|NA|NONE|NULL)?"
+        r"\s*$",
+        re.IGNORECASE,
+    )
+
+    while index < len(lines):
+        current_line = lines[index]
+
+        if not heading_pattern.match(current_line):
+            cleaned_lines.append(current_line)
+            index += 1
+            continue
+
+        block_end = index + 1
+        field_count = 0
+
+        while (
+            block_end < len(lines)
+            and field_pattern.match(lines[block_end])
+        ):
+            field_count += 1
+            block_end += 1
+
+        if field_count > 0:
+            # Skip the empty heading and all empty N/A fields.
+            index = block_end
+            continue
+
+        cleaned_lines.append(current_line)
+        index += 1
+
+    return "\n".join(cleaned_lines)
 
 
 # ============================================================
@@ -382,6 +594,14 @@ def render_result(
         per_mile = "N/A"
 
     # --------------------------------------------------------
+    # Weight
+    # --------------------------------------------------------
+
+    weight_display = _format_weight(
+        data.get("weight")
+    )
+
+    # --------------------------------------------------------
     # Duration
     # --------------------------------------------------------
 
@@ -452,16 +672,14 @@ def render_result(
         "ref_number": _safe_text(
             data.get("ref_number")
         ),
-        "weight": _safe_text(
-            data.get("weight")
-        ),
+        "weight": weight_display,
         "rate": rate_display,
         "total_miles": miles_display,
         "per_mile": per_mile,
         "duration": duration,
         "stops_info": stops_info,
 
-        # Reefer variables for default and custom templates
+        # Reefer variables for default and custom templates.
         "has_temperature_info": has_temperature_info,
         "temperature_set": _safe_text(
             temperature_set_raw
@@ -481,10 +699,8 @@ def render_result(
         else DEFAULT_TEMPLATE
     )
 
-    # Compatibility with templates that manually added "mi".
-    template_string = template_string.replace(
-        "{{ total_miles }} mi",
-        "{{ total_miles }}",
+    template_string = _normalize_template(
+        template_string
     )
 
     try:
@@ -496,13 +712,20 @@ def render_result(
             **clean_data
         )
 
-        # Remove excessive blank lines created by Jinja conditions.
+        # Remove empty reefer sections from old custom templates.
+        if not has_temperature_info:
+            rendered_text = _remove_empty_temperature_block(
+                rendered_text
+            )
+
+        # Remove lines containing only spaces or tabs.
         rendered_text = re.sub(
             r"\n[ \t]+\n",
             "\n\n",
             rendered_text,
         )
 
+        # Remove excessive blank lines created by Jinja conditions.
         rendered_text = re.sub(
             r"\n{3,}",
             "\n\n",
