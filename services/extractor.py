@@ -50,6 +50,8 @@ LOAD_RE = re.compile(
 
 RATE_RE = re.compile(
     r"(?:"
+    r"Carrier\s+Freight\s+Pay|"
+    r"Total\s+Carrier\s+Pay|"
     r"Total\s*(?:Carrier\s*)?Rate|"
     r"Total\s*Pay|"
     r"Rate\s*Total|"
@@ -72,6 +74,27 @@ MILES_RE = re.compile(
     r")"
     r"[:\s]*"
     r"([\d,]+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+
+
+TOTAL_WEIGHT_RE = re.compile(
+    r"(?:"
+    r"Total\s*Weight|"
+    r"Gross\s*Weight|"
+    r"Shipment\s*Weight"
+    r")"
+    r"[:\s]*"
+    r"([\d,]+(?:\.\d+)?)"
+    r"\s*(?:lbs?|pounds?)?",
+    re.IGNORECASE,
+)
+
+WEIGHT_RE = re.compile(
+    r"\bWeight\b"
+    r"[:\s]*"
+    r"([\d,]+(?:\.\d+)?)"
+    r"\s*(?:lbs?|pounds?)?",
     re.IGNORECASE,
 )
 
@@ -185,6 +208,19 @@ TEMPERATURE_NOTE_PATTERNS = (
 )
 
 
+
+EXPLICIT_TEMPERATURE_INSTRUCTION_RE = re.compile(
+    r"(?:"
+    r"\bdo\s+not\s+freeze\b|"
+    r"\bprotect\s+from\s+freez(?:e|ing)\b|"
+    r"\bkeep\s+(?:product\s+)?(?:frozen|refrigerated|chilled)\b|"
+    r"\bpre[\s-]*cool(?:ed|ing)?(?:\s+required)?\b|"
+    r"\breefer\b.{0,80}\b(?:continuous|start\s*[/\-]\s*stop|cycle\s+sentry)\b|"
+    r"\b(?:continuous|start\s*[/\-]\s*stop|cycle\s+sentry)\b.{0,80}\breefer\b"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
+
 # ============================================================
 # General helpers
 # ============================================================
@@ -275,6 +311,56 @@ def apply_defaults(
         result["deliveries"] = []
 
     return result
+
+
+def format_weight_value(raw_value: Any) -> str:
+    """
+    Normalize a numeric weight to a readable pounds value.
+    """
+    try:
+        numeric = float(
+            str(raw_value)
+            .replace(",", "")
+            .strip()
+        )
+    except (TypeError, ValueError):
+        return "N/A"
+
+    if numeric <= 0:
+        return "N/A"
+
+    if numeric.is_integer():
+        return f"{int(numeric):,} lbs"
+
+    return f"{numeric:,.1f} lbs"
+
+
+def extract_weight_fallback(
+    text: str,
+) -> Tuple[str, bool]:
+    """
+    Return an explicit total weight when available.
+
+    The boolean indicates whether the value came from a Total/Gross/
+    Shipment Weight label and may safely override a smaller AI value.
+    """
+    total_match = TOTAL_WEIGHT_RE.search(text)
+
+    if total_match:
+        return (
+            format_weight_value(total_match.group(1)),
+            True,
+        )
+
+    regular_match = WEIGHT_RE.search(text)
+
+    if regular_match:
+        return (
+            format_weight_value(regular_match.group(1)),
+            False,
+        )
+
+    return "N/A", False
 
 
 # ============================================================
@@ -425,9 +511,194 @@ def build_temperature_info(
     return "\n".join(lines)
 
 
+def has_explicit_temperature_requirement(
+    text: str,
+    fallback: Dict[str, str],
+) -> bool:
+    """
+    Accept temperature data only when the load contains an actual
+    setpoint/range or a direct operational temperature instruction.
+
+    Generic terms-and-conditions text mentioning "reefer temperature"
+    does not count.
+    """
+    if not is_missing(
+        fallback.get("temperature_set")
+    ):
+        return True
+
+    return bool(
+        EXPLICIT_TEMPERATURE_INSTRUCTION_RE.search(text)
+    )
+
+
 # ============================================================
 # Custom template learning
 # ============================================================
+
+
+TEMPLATE_TEMPERATURE_RE = re.compile(
+    r"\b(?:temperature|temp(?:erature)?\s*set|reefer)\b",
+    re.IGNORECASE,
+)
+
+
+def _strip_unrequested_temperature_blocks(
+    template_text: str,
+) -> str:
+    """
+    Remove temperature-related Jinja blocks and labels when the user
+    did not include a temperature section in their example.
+    """
+    lines = template_text.splitlines()
+    kept_lines = []
+    skip_depth = 0
+
+    for line in lines:
+        lowered = line.lower()
+
+        if skip_depth > 0:
+            if "{% if" in lowered:
+                skip_depth += 1
+
+            if "{% endif" in lowered:
+                skip_depth -= 1
+
+            continue
+
+        if (
+            "{% if" in lowered
+            and (
+                "temperature" in lowered
+                or "has_temperature_info" in lowered
+            )
+        ):
+            skip_depth = 1
+            continue
+
+        if any(
+            token in lowered
+            for token in (
+                "temperature_set",
+                "temperature_mode",
+                "temperature_notes",
+                "temperature_info",
+                "has_temperature_info",
+            )
+        ):
+            continue
+
+        if re.search(
+            r"\b(?:reefer\s+info|temp(?:erature)?\s+info|"
+            r"temperature\s+set|temperature\s+mode|"
+            r"temperature\s+notes)\b",
+            line,
+            re.IGNORECASE,
+        ):
+            continue
+
+        kept_lines.append(line)
+
+    return "\n".join(kept_lines)
+
+
+def _fill_blank_template_labels(
+    template_text: str,
+) -> str:
+    """
+    Repair common blank labels generated from user examples.
+    """
+    replacements = (
+        (
+            r"(?im)^(\s*(?:<b>)?WEIGHT(?:</b>)?\s*:)\s*$",
+            r"\1 {{ weight }}",
+        ),
+        (
+            r"(?im)^(\s*(?:<b>)?TOTAL\s+MILES?(?:</b>)?\s*:)\s*$",
+            r"\1 {{ total_miles }}",
+        ),
+        (
+            r"(?im)^(\s*(?:<b>)?TOTAL\s+MILE(?:</b>)?\s*:)\s*$",
+            r"\1 {{ total_miles }}",
+        ),
+        (
+            r"(?im)^(\s*(?:<b>)?RATE(?:</b>)?\s*:)\s*$",
+            r"\1 {{ rate }}",
+        ),
+    )
+
+    for pattern, replacement in replacements:
+        template_text = re.sub(
+            pattern,
+            replacement,
+            template_text,
+        )
+
+    return template_text
+
+
+def normalize_learned_template(
+    template_text: str,
+    user_example: str,
+) -> str:
+    """
+    Keep the learned template faithful to the user's example.
+
+    The renderer already supplies currency, mileage units, and weight
+    units, so duplicated symbols around placeholders are removed.
+    """
+    normalized = (
+        template_text
+        .replace("```jinja2", "")
+        .replace("```json", "")
+        .replace("```", "")
+        .strip()
+    )
+
+    normalized = re.sub(
+        r"\$\s*\{\{\s*rate\s*\}\}",
+        "{{ rate }}",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+
+    normalized = re.sub(
+        r"\{\{\s*total_miles\s*\}\}\s*(?:mi|miles?)\b",
+        "{{ total_miles }}",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+
+    normalized = re.sub(
+        r"\{\{\s*weight\s*\}\}\s*(?:lbs?|pounds?)\b",
+        "{{ weight }}",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+
+    normalized = _fill_blank_template_labels(
+        normalized
+    )
+
+    user_requested_temperature = bool(
+        TEMPLATE_TEMPERATURE_RE.search(
+            user_example
+        )
+    )
+
+    if not user_requested_temperature:
+        normalized = _strip_unrequested_temperature_blocks(
+            normalized
+        )
+
+    normalized = re.sub(
+        r"\n{3,}",
+        "\n\n",
+        normalized,
+    )
+
+    return normalized.strip()
+
 
 async def extract_template_structure(
     system_prompt: str,
@@ -493,13 +764,27 @@ async def extract_template_structure(
 
     instructions = (
         f"{system_prompt}\n\n"
-        "Replace all pickup and delivery stops with "
+        "Create a Jinja template that follows the user's example "
+        "exactly.\n"
+        "STRICT TEMPLATE RULES:\n"
+        "1. Keep all fixed notes, warnings, emojis, separators, "
+        "wording, and line order exactly as provided.\n"
+        "2. Replace all pickup and delivery blocks with "
         "{{ stops_info }}.\n"
-        "For reefer information, use these variables:\n"
-        "{{ temperature_set }}\n"
-        "{{ temperature_mode }}\n"
-        "{{ temperature_notes }}\n"
-        "{{ temperature_info }}\n"
+        "3. Use only fields and sections that are visibly present "
+        "in the user's example. Do not add any new section.\n"
+        "4. If the example has a blank WEIGHT label, use "
+        "{{ weight }} after it.\n"
+        "5. Use {{ rate }} without adding a dollar sign because "
+        "the renderer already includes $.\n"
+        "6. Use {{ total_miles }} without adding mi or miles "
+        "because the renderer already includes the unit.\n"
+        "7. Use {{ weight }} without adding lbs because the "
+        "renderer already includes the unit.\n"
+        "8. Never add Reefer Info, TEMP INFO, temperature fields, "
+        "or temperature variables unless the user's example itself "
+        "contains a temperature or reefer section.\n"
+        "9. Do not append a list of available variables.\n"
         "Return only the Jinja template without Markdown fences."
     )
 
@@ -543,7 +828,13 @@ async def extract_template_structure(
                     .strip()
                 )
 
-                return skeleton or user_example
+                if not skeleton:
+                    return user_example
+
+                return normalize_learned_template(
+                    skeleton,
+                    user_example,
+                )
 
             except Exception as exc:
                 logger.exception(
@@ -1137,6 +1428,25 @@ async def smart_extract(
             len(fallback_stops["deliveries"]),
         )
 
+    # Weight fallback
+    fallback_weight, is_explicit_total_weight = (
+        extract_weight_fallback(text)
+    )
+
+    if (
+        is_explicit_total_weight
+        and not is_missing(fallback_weight)
+    ):
+        # An explicitly labeled total is more reliable than a
+        # single-order or single-stop weight selected by AI.
+        data["weight"] = fallback_weight
+
+    elif (
+        is_missing(data.get("weight"))
+        and not is_missing(fallback_weight)
+    ):
+        data["weight"] = fallback_weight
+
     # Load number fallback
     load_match = LOAD_RE.search(text)
 
@@ -1185,8 +1495,12 @@ async def smart_extract(
             # Direct labeled PDF extraction has priority over AI.
             data[field_name] = fallback_value
 
-    # Prevent AI from inventing reefer information for dry loads.
-    if not REEFER_SIGNAL_RE.search(text):
+    # Prevent generic contracts and legal language from creating
+    # a fake temperature section for a dry or unspecified load.
+    if not has_explicit_temperature_requirement(
+        text,
+        fallback_temperature,
+    ):
         data["temperature_set"] = "N/A"
         data["temperature_mode"] = "N/A"
         data["temperature_notes"] = "N/A"
