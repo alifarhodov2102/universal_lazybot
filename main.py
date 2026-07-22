@@ -14,7 +14,10 @@ from config import (
     MAX_CONCURRENT_OCR,
     MAX_CONCURRENT_AI,
 )
-from database.connection import init_db, AsyncSessionLocal
+from database.connection import (
+    init_db,
+    AsyncSessionLocal,
+)
 from handlers import (
     admin,
     billing,
@@ -68,7 +71,6 @@ async def synchronize_database_columns() -> None:
                 dialect_name,
             )
 
-            # PostgreSQL supports ADD COLUMN IF NOT EXISTS.
             if dialect_name == "postgresql":
                 await session.execute(
                     text(
@@ -107,9 +109,6 @@ async def synchronize_database_columns() -> None:
                 )
 
             else:
-                # init_db() already creates all columns for a new
-                # SQLite database. The PostgreSQL migration syntax
-                # is intentionally not executed on SQLite.
                 logger.info(
                     "Automatic legacy column migration skipped "
                     "for database dialect %s.",
@@ -125,11 +124,80 @@ async def synchronize_database_columns() -> None:
 
 
 # ============================================================
+# Telegram webhook cleanup
+# ============================================================
+
+async def ensure_webhook_disabled(
+    bot: Bot,
+    max_attempts: int = 3,
+) -> None:
+    """
+    Make sure no Telegram webhook is active before long polling starts.
+
+    Telegram does not allow getUpdates polling while a webhook is
+    registered for the same bot token.
+    """
+    for attempt in range(
+        1,
+        max_attempts + 1,
+    ):
+        webhook_info = await bot.get_webhook_info()
+
+        if webhook_info.url:
+            logger.warning(
+                "Active webhook detected: %s",
+                webhook_info.url,
+            )
+
+        else:
+            logger.info(
+                "No active webhook detected."
+            )
+
+        deleted = await bot.delete_webhook(
+            drop_pending_updates=False,
+        )
+
+        logger.info(
+            "Webhook deletion attempt %s/%s returned: %s",
+            attempt,
+            max_attempts,
+            deleted,
+        )
+
+        await asyncio.sleep(1)
+
+        webhook_info = await bot.get_webhook_info()
+
+        if not webhook_info.url:
+            logger.info(
+                "Webhook is disabled. Long polling can start."
+            )
+            return
+
+        logger.warning(
+            "Webhook is still active after attempt %s: %s",
+            attempt,
+            webhook_info.url,
+        )
+
+    raise RuntimeError(
+        "Telegram webhook is still active after "
+        f"{max_attempts} deletion attempts. "
+        "Another running service may be setting the webhook."
+    )
+
+
+# ============================================================
 # Startup and shutdown
 # ============================================================
 
-async def on_startup(bot: Bot) -> None:
-    logger.info("Starting Lazy Alice.")
+async def on_startup(
+    bot: Bot,
+) -> None:
+    logger.info(
+        "Starting Lazy Alice."
+    )
 
     await init_db()
     await synchronize_database_columns()
@@ -160,11 +228,17 @@ async def on_startup(bot: Bot) -> None:
         bot_info.id,
     )
 
-    logger.info("Lazy Alice is ready.")
+    logger.info(
+        "Lazy Alice is ready."
+    )
 
 
-async def on_shutdown(bot: Bot) -> None:
-    logger.info("Lazy Alice is shutting down.")
+async def on_shutdown(
+    bot: Bot,
+) -> None:
+    logger.info(
+        "Lazy Alice is shutting down."
+    )
 
 
 # ============================================================
@@ -207,9 +281,6 @@ async def main() -> None:
     # Routers
     # --------------------------------------------------------
 
-    # Payment handlers are placed early, although middleware still
-    # executes before routers. We must check middlewares next to make
-    # sure successful_payment updates are never blocked.
     dispatcher.include_router(
         admin.router
     )
@@ -234,15 +305,17 @@ async def main() -> None:
         processor.router
     )
 
-    logger.info(
-        "Starting Telegram long polling."
-    )
-
     try:
-        # Preserve pending updates. This is important for payment
-        # confirmations that arrived while Railway was restarting.
-        await bot.delete_webhook(
-            drop_pending_updates=False
+        logger.info(
+            "Checking Telegram webhook status."
+        )
+
+        await ensure_webhook_disabled(
+            bot
+        )
+
+        logger.info(
+            "Starting Telegram long polling."
         )
 
         await dispatcher.start_polling(
@@ -256,11 +329,12 @@ async def main() -> None:
         logger.info(
             "Telegram polling was cancelled."
         )
+
         raise
 
     except Exception:
         logger.exception(
-            "Telegram polling stopped because of an error."
+            "Telegram bot stopped because of an error."
         )
 
         raise
