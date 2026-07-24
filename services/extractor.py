@@ -17,6 +17,10 @@ from config import (
 logger = logging.getLogger("LazyAlice.Extractor")
 
 
+# Current DeepSeek API model.
+DEEPSEEK_MODEL = "deepseek-v4-flash"
+
+
 # ============================================================
 # Concurrency
 # ============================================================
@@ -800,7 +804,7 @@ async def extract_template_structure(
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": "deepseek-chat",
+                        "model": DEEPSEEK_MODEL,
                         "messages": [
                             {
                                 "role": "system",
@@ -1137,7 +1141,7 @@ RATE CONFIRMATION TEXT:
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": "deepseek-chat",
+                        "model": DEEPSEEK_MODEL,
                         "messages": [
                             {
                                 "role": "system",
