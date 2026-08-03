@@ -20,6 +20,24 @@ logger = logging.getLogger("LazyAlice.Extractor")
 # Current DeepSeek API model.
 DEEPSEEK_MODEL = "deepseek-v4-flash"
 
+# DeepSeek can occasionally take longer to finish sending a response,
+# especially when the API is under load. Thinking mode is disabled in
+# both requests because extraction and template generation do not need
+# long reasoning.
+DEEPSEEK_TEMPLATE_TIMEOUT = httpx.Timeout(
+    connect=10.0,
+    read=120.0,
+    write=30.0,
+    pool=10.0,
+)
+
+DEEPSEEK_EXTRACTION_TIMEOUT = httpx.Timeout(
+    connect=10.0,
+    read=120.0,
+    write=30.0,
+    pool=10.0,
+)
+
 
 # ============================================================
 # Concurrency
@@ -212,7 +230,6 @@ TEMPERATURE_NOTE_PATTERNS = (
 )
 
 
-
 EXPLICIT_TEMPERATURE_INSTRUCTION_RE = re.compile(
     r"(?:"
     r"\bdo\s+not\s+freeze\b|"
@@ -224,6 +241,7 @@ EXPLICIT_TEMPERATURE_INSTRUCTION_RE = re.compile(
     r")",
     re.IGNORECASE | re.DOTALL,
 )
+
 
 # ============================================================
 # General helpers
@@ -540,7 +558,6 @@ def has_explicit_temperature_requirement(
 # Custom template learning
 # ============================================================
 
-
 TEMPLATE_TEMPERATURE_RE = re.compile(
     r"\b(?:temperature|temp(?:erature)?\s*set|reefer)\b",
     re.IGNORECASE,
@@ -815,9 +832,13 @@ async def extract_template_structure(
                                 "content": user_example,
                             },
                         ],
+                        "thinking": {
+                            "type": "disabled",
+                        },
                         "temperature": 0.1,
+                        "max_tokens": 2000,
                     },
-                    timeout=30.0,
+                    timeout=DEEPSEEK_TEMPLATE_TIMEOUT,
                 )
 
                 response.raise_for_status()
@@ -839,6 +860,22 @@ async def extract_template_structure(
                     skeleton,
                     user_example,
                 )
+
+            except httpx.TimeoutException:
+                logger.error(
+                    "Template extraction timed out after 120 seconds."
+                )
+
+                return user_example
+
+            except httpx.HTTPStatusError as exc:
+                logger.error(
+                    "DeepSeek template HTTP error %s: %s",
+                    exc.response.status_code,
+                    exc.response.text[:500],
+                )
+
+                return user_example
 
             except Exception as exc:
                 logger.exception(
@@ -1158,9 +1195,16 @@ RATE CONFIRMATION TEXT:
                                 "content": prompt,
                             },
                         ],
+                        "thinking": {
+                            "type": "disabled",
+                        },
+                        "response_format": {
+                            "type": "json_object",
+                        },
                         "temperature": 0,
+                        "max_tokens": 3000,
                     },
-                    timeout=60.0,
+                    timeout=DEEPSEEK_EXTRACTION_TIMEOUT,
                 )
 
                 response.raise_for_status()
@@ -1173,6 +1217,11 @@ RATE CONFIRMATION TEXT:
                 )
 
                 return clean_ai_json(content)
+
+            except httpx.TimeoutException:
+                logger.error(
+                    "DeepSeek extraction timed out after 120 seconds."
+                )
 
             except httpx.HTTPStatusError as exc:
                 logger.error(
@@ -1188,7 +1237,6 @@ RATE CONFIRMATION TEXT:
                 )
 
     return None
-
 
 
 # ============================================================
@@ -1390,6 +1438,7 @@ def extract_hwyhaul_stops_fallback(
 
     return result
 
+
 # ============================================================
 # Main pipeline
 # ============================================================
@@ -1404,7 +1453,6 @@ async def smart_extract(
     data = apply_defaults(
         await deepseek_ai_extract(text)
     )
-
 
     # Deterministic stop fallback for Hwy Haul-style documents.
     # It only fills a missing side and never overwrites valid AI stops.
