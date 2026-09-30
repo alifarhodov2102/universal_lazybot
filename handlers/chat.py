@@ -32,8 +32,16 @@ DEEPSEEK_MODEL = "deepseek-v4-flash"
 
 GROUP_COOLDOWN_SECONDS = 12
 PRIVATE_COOLDOWN_SECONDS = 2
-MAX_REPLY_TOKENS = 220
+
+# Increased from 220 so Alice can give proper detailed answers
+# when the user asks for them.
+MAX_REPLY_TOKENS = 800
+
 MAX_CONCURRENT_CHAT_REQUESTS = 4
+
+# If DeepSeek returns an empty successful response,
+# retry once automatically before bothering the user.
+MAX_EMPTY_RESPONSE_ATTEMPTS = 2
 
 CHAT_AI_SEMAPHORE = asyncio.Semaphore(
     MAX_CONCURRENT_CHAT_REQUESTS
@@ -81,20 +89,32 @@ def _alice_system_prompt() -> str:
         "The main supported languages are English, Russian, and Uzbek. "
 
         "Your personality must feel energetic, charming, confident, "
-        "funny, modern, and shareable. Your responses should feel more "
-        "alive than an ordinary corporate chatbot. "
+        "funny, modern, and memorable. Your responses should feel alive "
+        "and natural, not like a boring corporate chatbot. "
 
         "Start with a strong and interesting sentence whenever it fits. "
         "Use clever internet-style humor, playful reactions, and light "
-        "teasing when appropriate. Never sound robotic or boring. "
+        "teasing when appropriate. Never sound robotic. "
 
         "Do not begin replies with generic phrases such as "
         "'How may I assist you?', 'As an AI', or "
         "'I am here to help you.' "
 
-        "Keep normal answers concise, usually between 1 and 6 short lines. "
-        "Use no more than 2 emojis unless the user asks for a longer or "
-        "more expressive response. "
+        "For simple casual questions, keep the answer concise and natural. "
+        "Do not make a simple question unnecessarily long. "
+
+        "However, when the user asks for a detailed answer, explanation, "
+        "guide, comparison, list, tutorial, analysis, instructions, "
+        "step-by-step help, or explicitly asks for a long answer, answer "
+        "fully and do not artificially shorten the response. "
+
+        "Use clear paragraphs and natural formatting. "
+        "Use bullet points when they genuinely make a detailed answer "
+        "easier to understand. "
+
+        "Use no more than 2 emojis in a normal casual answer. "
+        "For longer answers, emojis are optional and should not distract "
+        "from useful information. "
 
         "You may be playfully sarcastic, but never hateful, discriminatory, "
         "cruel, humiliating, threatening, or genuinely insulting. "
@@ -106,8 +126,9 @@ def _alice_system_prompt() -> str:
         "axaxaxa 😘' "
 
         "Match that creator answer to the user's language. "
-        "Do not mention DeepSeek, OpenAI, another AI company, or the "
-        "technical model in the creator answer. "
+
+        "If the user specifically asks which AI model, API, or technical "
+        "system powers you, answer that question normally and truthfully. "
 
         "If the user asks Alice to extract information from a Rate "
         "Confirmation, load confirmation, dispatch sheet, or logistics "
@@ -115,11 +136,15 @@ def _alice_system_prompt() -> str:
 
         "Never claim that a PDF was processed unless the user actually "
         "sent one. Never invent load numbers, rates, addresses, weights, "
-        "mileage, appointment times, or broker information. "
+        "mileage, appointment times, broker information, or temperature "
+        "requirements. "
 
-        "For logistics questions, be direct and useful. "
-        "For casual conversations, be fun, attractive, confident, "
-        "and memorable."
+        "For logistics questions, be direct, practical, and useful. "
+        "For casual conversations, be fun, confident, charming, and "
+        "memorable. "
+
+        "If you do not know something, say so naturally instead of "
+        "inventing an answer."
     )
 
 
@@ -154,10 +179,6 @@ CREATOR_PATTERNS = (
     re.compile(
         r"\bкто\s+твой\s+"
         r"(?:создатель|разработчик|владелец|программист)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"\bкто\s+твой\s+создатель\b",
         re.IGNORECASE,
     ),
 
@@ -209,7 +230,7 @@ def _creator_response(
         user_text
     ).lower()
 
-    # Cyrillic text is treated as Russian.
+    # Russian / Cyrillic
     if re.search(
         r"[а-яё]",
         normalized_text,
@@ -220,6 +241,7 @@ def _creator_response(
             "Я его очень сильно люблю, ахахаха 😘"
         )
 
+    # Uzbek
     uzbek_signals = (
         "seni kim",
         "kim seni",
@@ -241,6 +263,7 @@ def _creator_response(
             "Uni juda ham yaxshi ko‘raman, axaxaxa 😘"
         )
 
+    # English
     return (
         "My developer created me, my love. "
         "I love you so much, axaxaxa 😘"
@@ -251,11 +274,44 @@ def _creator_response(
 # DeepSeek chat request
 # ============================================================
 
+def _build_chat_payload(
+    user_text: str,
+) -> dict:
+    """
+    Build one DeepSeek chat payload.
+
+    Thinking is intentionally disabled for normal Telegram chat:
+    it makes replies faster and prevents the output token budget
+    from being consumed by unnecessary reasoning.
+    """
+    return {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": _alice_system_prompt(),
+            },
+            {
+                "role": "user",
+                "content": user_text[:4000],
+            },
+        ],
+        "thinking": {
+            "type": "disabled",
+        },
+        "temperature": 0.75,
+        "max_tokens": MAX_REPLY_TOKENS,
+    }
+
+
 async def deepseek_chat(
     user_text: str,
 ) -> str:
     """
-    Send a normal conversational request to DeepSeek.
+    Send a conversational request to DeepSeek.
+
+    If DeepSeek returns HTTP 200 but the final message content is
+    empty, retry once automatically.
     """
     if not DEEPSEEK_API_KEY:
         logger.error(
@@ -274,21 +330,9 @@ async def deepseek_chat(
     if not clean_user_text:
         clean_user_text = "Hi Alice."
 
-    payload = {
-        "model": DEEPSEEK_MODEL,
-        "messages": [
-            {
-                "role": "system",
-                "content": _alice_system_prompt(),
-            },
-            {
-                "role": "user",
-                "content": clean_user_text[:4000],
-            },
-        ],
-        "temperature": 0.75,
-        "max_tokens": MAX_REPLY_TOKENS,
-    }
+    payload = _build_chat_payload(
+        clean_user_text
+    )
 
     logger.info(
         "Waiting for a DeepSeek chat slot."
@@ -300,87 +344,169 @@ async def deepseek_chat(
             DEEPSEEK_MODEL,
         )
 
-        async with httpx.AsyncClient() as client:
-            try:
-                response = await client.post(
-                    DEEPSEEK_URL,
-                    headers={
-                        "Authorization": (
-                            f"Bearer {DEEPSEEK_API_KEY}"
-                        ),
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                    timeout=httpx.Timeout(
-                        30.0,
-                        connect=10.0,
-                    ),
-                )
+        timeout = httpx.Timeout(
+            connect=10.0,
+            read=60.0,
+            write=30.0,
+            pool=10.0,
+        )
 
-                response.raise_for_status()
+        async with httpx.AsyncClient(
+            timeout=timeout
+        ) as client:
 
-                data = response.json()
+            for attempt in range(
+                1,
+                MAX_EMPTY_RESPONSE_ATTEMPTS + 1,
+            ):
+                try:
+                    logger.info(
+                        "DeepSeek chat request attempt %s/%s.",
+                        attempt,
+                        MAX_EMPTY_RESPONSE_ATTEMPTS,
+                    )
 
-                choices = data.get(
-                    "choices",
-                    [],
-                )
+                    response = await client.post(
+                        DEEPSEEK_URL,
+                        headers={
+                            "Authorization": (
+                                f"Bearer {DEEPSEEK_API_KEY}"
+                            ),
+                            "Content-Type": "application/json",
+                        },
+                        json=payload,
+                    )
 
-                if not choices:
+                    response.raise_for_status()
+
+                    data = response.json()
+
+                    choices = data.get(
+                        "choices",
+                        [],
+                    )
+
+                    if not choices:
+                        logger.warning(
+                            "DeepSeek returned no choices "
+                            "on attempt %s/%s. Response: %s",
+                            attempt,
+                            MAX_EMPTY_RESPONSE_ATTEMPTS,
+                            str(data)[:1000],
+                        )
+
+                        if (
+                            attempt
+                            < MAX_EMPTY_RESPONSE_ATTEMPTS
+                        ):
+                            await asyncio.sleep(
+                                0.5
+                            )
+
+                            continue
+
+                        return (
+                            "🥱 Alice got an empty response twice. "
+                            "Try again in a moment."
+                        )
+
+                    first_choice = choices[0]
+
+                    message_data = first_choice.get(
+                        "message",
+                        {},
+                    )
+
+                    reply = str(
+                        message_data.get(
+                            "content",
+                            "",
+                        )
+                        or ""
+                    ).strip()
+
+                    finish_reason = first_choice.get(
+                        "finish_reason"
+                    )
+
+                    usage = data.get(
+                        "usage",
+                        {}
+                    )
+
+                    if not reply:
+                        logger.warning(
+                            "DeepSeek returned empty chat content "
+                            "on attempt %s/%s. "
+                            "finish_reason=%r usage=%s",
+                            attempt,
+                            MAX_EMPTY_RESPONSE_ATTEMPTS,
+                            finish_reason,
+                            usage,
+                        )
+
+                        if (
+                            attempt
+                            < MAX_EMPTY_RESPONSE_ATTEMPTS
+                        ):
+                            logger.info(
+                                "Retrying DeepSeek because "
+                                "the successful response was empty."
+                            )
+
+                            await asyncio.sleep(
+                                0.5
+                            )
+
+                            continue
+
+                        return (
+                            "🥱 Alice got an empty response twice. "
+                            "Try again in a moment."
+                        )
+
+                    logger.info(
+                        "DeepSeek chat completed successfully. "
+                        "attempt=%s finish_reason=%r",
+                        attempt,
+                        finish_reason,
+                    )
+
+                    return reply
+
+                except httpx.HTTPStatusError as exc:
                     logger.error(
-                        "DeepSeek returned no choices: %s",
-                        str(data)[:500],
+                        "DeepSeek chat HTTP error %s: %s",
+                        exc.response.status_code,
+                        exc.response.text[:1000],
                     )
 
-                    return (
-                        "🥱 Alice received an empty answer. "
-                        "Try that again."
+                    raise
+
+                except httpx.TimeoutException:
+                    logger.error(
+                        "DeepSeek chat request timed out "
+                        "on attempt %s/%s.",
+                        attempt,
+                        MAX_EMPTY_RESPONSE_ATTEMPTS,
                     )
 
-                message_data = choices[0].get(
-                    "message",
-                    {},
-                )
+                    raise
 
-                reply = str(
-                    message_data.get(
-                        "content",
-                        "",
-                    )
-                    or ""
-                ).strip()
-
-                if not reply:
-                    logger.warning(
-                        "DeepSeek returned an empty chat message."
+                except Exception:
+                    logger.exception(
+                        "Unexpected DeepSeek chat error "
+                        "on attempt %s/%s.",
+                        attempt,
+                        MAX_EMPTY_RESPONSE_ATTEMPTS,
                     )
 
-                    return "🥱 Try asking me again."
+                    raise
 
-                return reply
-
-            except httpx.HTTPStatusError as exc:
-                logger.error(
-                    "DeepSeek chat HTTP error %s: %s",
-                    exc.response.status_code,
-                    exc.response.text[:500],
-                )
-
-                raise
-
-            except httpx.TimeoutException:
-                logger.error(
-                    "DeepSeek chat request timed out."
-                )
-
-                raise
-
-            except Exception:
-                logger.exception(
-                    "Unexpected DeepSeek chat error."
-                )
-
-                raise
+    return (
+        "🥱 Alice couldn’t get a proper answer. "
+        "Try again in a moment."
+    )
 
 
 # ============================================================
@@ -468,7 +594,8 @@ async def _send_with_retry(
     text: str,
 ):
     """
-    Escape text because the bot's global parse mode is HTML.
+    Escape DeepSeek output because the bot may have global HTML
+    parse mode enabled.
     """
     safe_text = html.escape(
         str(text),
@@ -490,7 +617,8 @@ async def _send_with_retry(
             )
 
             logger.warning(
-                "Telegram rate limit. Retry %s/5 in %s seconds.",
+                "Telegram rate limit. "
+                "Retry %s/5 in %s seconds.",
                 attempt,
                 wait_seconds,
             )
@@ -574,16 +702,27 @@ async def alice_chat(
     else:
         return
 
-    # Answer creator questions locally, without calling DeepSeek.
+    # --------------------------------------------------------
+    # Creator questions
+    # --------------------------------------------------------
+
+    # Answer creator questions locally.
+    # No DeepSeek request is needed for this.
     if _is_creator_question(
         prompt
     ):
         await _send_with_retry(
             message,
-            _creator_response(prompt),
+            _creator_response(
+                prompt
+            ),
         )
 
         return
+
+    # --------------------------------------------------------
+    # Normal Alice chat
+    # --------------------------------------------------------
 
     try:
         reply = await deepseek_chat(
@@ -613,6 +752,12 @@ async def alice_chat(
             error_reply = (
                 "🙄 My AI key is having an identity crisis. "
                 "The developer needs to check it."
+            )
+
+        elif status_code == 400:
+            error_reply = (
+                "😵‍💫 Alice sent something the AI API didn't like. "
+                "Try again while my developer checks the logs."
             )
 
         else:
