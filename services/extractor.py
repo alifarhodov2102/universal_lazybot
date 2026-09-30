@@ -564,6 +564,57 @@ TEMPLATE_TEMPERATURE_RE = re.compile(
 )
 
 
+# Every learned custom template gets this safe optional temperature block
+# unless the user's own template already contains temperature variables.
+# The renderer supplies has_temperature_info and temperature_info, so this
+# block appears only for loads with a real temperature requirement.
+AUTO_TEMPERATURE_BLOCK = """
+{% if has_temperature_info %}
+🌡 <b>TEMP INFO:</b>
+{{ temperature_info }}
+{% endif %}
+""".strip()
+
+
+def _template_has_temperature_support(
+    template_text: str,
+) -> bool:
+    """
+    Return True when a custom Jinja template already knows how to render
+    extracted temperature information.
+    """
+    lowered = template_text.lower()
+
+    return any(
+        token in lowered
+        for token in (
+            "has_temperature_info",
+            "temperature_info",
+            "temperature_set",
+            "temperature_mode",
+            "temperature_notes",
+        )
+    )
+
+
+def _append_auto_temperature_block(
+    template_text: str,
+) -> str:
+    """
+    Add the standard conditional temperature section exactly once.
+
+    It is safe for dry loads because has_temperature_info is False when
+    no real setpoint/mode/note was extracted.
+    """
+    if _template_has_temperature_support(template_text):
+        return template_text.strip()
+
+    return (
+        f"{template_text.strip()}\n\n"
+        f"{AUTO_TEMPERATURE_BLOCK}"
+    ).strip()
+
+
 def _strip_unrequested_temperature_blocks(
     template_text: str,
 ) -> str:
@@ -708,9 +759,19 @@ def normalize_learned_template(
     )
 
     if not user_requested_temperature:
+        # DeepSeek may invent a reefer section even when the user's
+        # example does not contain one. Remove that first so we never
+        # save an unconditional or N/A-filled temperature block.
         normalized = _strip_unrequested_temperature_blocks(
             normalized
         )
+
+    # Every custom template must still be capable of displaying a real
+    # temperature requirement. If the user supplied their own temperature
+    # variables, keep them. Otherwise add our safe conditional block.
+    normalized = _append_auto_temperature_block(
+        normalized
+    )
 
     normalized = re.sub(
         r"\n{3,}",
@@ -763,11 +824,9 @@ async def extract_template_structure(
 <b>TOTAL MILES:</b> {{ total_miles }}
 <b>RATE:</b> {{ rate }}
 
-{% if temperature_set and temperature_set != 'N/A' %}
+{% if has_temperature_info %}
 🌡 <b>TEMP INFO:</b>
-<b>SET:</b> {{ temperature_set }}
-{% if temperature_mode and temperature_mode != 'N/A' %}<b>MODE:</b> {{ temperature_mode }}{% endif %}
-{% if temperature_notes and temperature_notes != 'N/A' %}<b>NOTES:</b> {{ temperature_notes }}{% endif %}
+{{ temperature_info }}
 {% endif %}
 """
 
@@ -793,7 +852,7 @@ async def extract_template_structure(
         "2. Replace all pickup and delivery blocks with "
         "{{ stops_info }}.\n"
         "3. Use only fields and sections that are visibly present "
-        "in the user's example. Do not add any new section.\n"
+        "in the user's example. Do not invent extra sections.\n"
         "4. If the example has a blank WEIGHT label, use "
         "{{ weight }} after it.\n"
         "5. Use {{ rate }} without adding a dollar sign because "
@@ -802,10 +861,14 @@ async def extract_template_structure(
         "because the renderer already includes the unit.\n"
         "7. Use {{ weight }} without adding lbs because the "
         "renderer already includes the unit.\n"
-        "8. Never add Reefer Info, TEMP INFO, temperature fields, "
-        "or temperature variables unless the user's example itself "
-        "contains a temperature or reefer section.\n"
-        "9. Do not append a list of available variables.\n"
+        "8. Do not invent a Reefer Info or TEMP INFO section when "
+        "the user's example does not contain one. The application "
+        "will automatically attach its own conditional temperature "
+        "block after this template is learned.\n"
+        "9. If the user's example already contains a temperature or "
+        "reefer section, preserve its position and wording and use the "
+        "available temperature variables where appropriate.\n"
+        "10. Do not append a list of available variables.\n"
         "Return only the Jinja template without Markdown fences."
     )
 
