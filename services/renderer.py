@@ -36,6 +36,17 @@ DEFAULT_TEMPLATE = """
 """
 
 
+# Conditional reefer block automatically added to custom templates that
+# do not already contain temperature support. Because it is conditional,
+# dry loads stay clean and show no temperature section.
+AUTO_TEMPERATURE_BLOCK = """
+{% if has_temperature_info %}
+🌡 <b>TEMP INFO:</b>
+{{ temperature_info }}
+{% endif %}
+""".strip()
+
+
 # ============================================================
 # General helpers
 # ============================================================
@@ -446,6 +457,58 @@ def _normalize_template(
     return normalized
 
 
+def _template_has_temperature_support(
+    template_string: str,
+) -> bool:
+    """
+    Return True when a template already contains working temperature
+    variables or the standard conditional temperature block.
+
+    We check Jinja variable names instead of plain words such as
+    "temperature" so an old note mentioning temperature does not
+    accidentally disable automatic reefer support.
+    """
+    lowered = str(template_string).lower()
+
+    temperature_markers = (
+        "has_temperature_info",
+        "temperature_info",
+        "temperature_set",
+        "temperature_mode",
+        "temperature_notes",
+    )
+
+    return any(
+        marker in lowered
+        for marker in temperature_markers
+    )
+
+
+def _ensure_temperature_support(
+    template_string: str,
+) -> str:
+    """
+    Make every template reefer-aware without changing dry-load output.
+
+    This is especially important for custom templates that were saved
+    before automatic temperature support was added. Those templates are
+    still stored in PostgreSQL, so fixing only /set_template would not
+    repair them. The renderer adds the conditional block at runtime.
+
+    If the template already contains temperature variables, it is left
+    untouched to avoid duplicate temperature sections.
+    """
+    template_text = str(template_string).rstrip()
+
+    if _template_has_temperature_support(template_text):
+        return template_text
+
+    return (
+        f"{template_text}\n\n"
+        f"{AUTO_TEMPERATURE_BLOCK}"
+    )
+
+
 def _remove_empty_temperature_block(
     rendered_text: str,
 ) -> str:
@@ -700,6 +763,13 @@ def render_result(
     )
 
     template_string = _normalize_template(
+        template_string
+    )
+
+    # Make old and new custom templates automatically support reefer
+    # temperature information. The appended block renders only when the
+    # extracted load actually contains temperature data.
+    template_string = _ensure_temperature_support(
         template_string
     )
 
