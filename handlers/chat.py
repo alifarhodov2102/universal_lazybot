@@ -3,16 +3,21 @@ import html
 import logging
 import re
 import time
+from datetime import datetime, timedelta
+from typing import Dict, List
 
 import httpx
 from aiogram import Bot, F, Router, types
 from aiogram.enums import ChatType
 from aiogram.exceptions import TelegramRetryAfter
+from sqlalchemy import delete, select
 
 from config import (
     DEEPSEEK_API_KEY,
     DEEPSEEK_URL,
 )
+from database.connection import AsyncSessionLocal
+from database.models import ChatMessage
 
 
 router = Router()
@@ -48,6 +53,295 @@ CHAT_AI_SEMAPHORE = asyncio.Semaphore(
 )
 
 _user_last_reply_ts: dict[int, float] = {}
+
+
+# ============================================================
+# 24-hour conversation memory
+# ============================================================
+
+CHAT_MEMORY_HOURS = 24
+
+# Send only a small recent window back to DeepSeek so follow-up
+# conversations work without letting token usage grow forever.
+MAX_HISTORY_MESSAGES = 12
+MAX_HISTORY_CHARACTERS = 8000
+
+# Current chat input is already limited to 4000 characters before
+# being sent to DeepSeek, so store the same maximum for memory.
+MAX_STORED_MESSAGE_CHARACTERS = 4000
+
+# Background cleanup runs every hour. Messages are also filtered by
+# the exact 24-hour cutoff when history is loaded.
+CHAT_MEMORY_CLEANUP_INTERVAL_SECONDS = 3600
+
+
+async def cleanup_expired_chat_messages() -> int:
+    """
+    Permanently delete Alice chat-memory rows older than 24 hours.
+
+    This touches only the chat_messages table. It never modifies users,
+    Pro status, expiry dates, templates, payments, or PDF data.
+    """
+    cutoff = datetime.utcnow() - timedelta(
+        hours=CHAT_MEMORY_HOURS
+    )
+
+    async with AsyncSessionLocal() as session:
+        try:
+            result = await session.execute(
+                delete(ChatMessage).where(
+                    ChatMessage.created_at < cutoff
+                )
+            )
+
+            await session.commit()
+
+            deleted_count = (
+                result.rowcount
+                if result.rowcount is not None
+                and result.rowcount > 0
+                else 0
+            )
+
+            if deleted_count:
+                logger.info(
+                    "Deleted %s expired chat-memory message(s).",
+                    deleted_count,
+                )
+
+            return deleted_count
+
+        except Exception:
+            await session.rollback()
+
+            logger.exception(
+                "Failed to clean expired chat memory."
+            )
+
+            return 0
+
+
+async def chat_memory_cleanup_loop() -> None:
+    """
+    Periodically remove expired chat memory in the background.
+    """
+    logger.info(
+        "24-hour chat-memory cleanup loop started."
+    )
+
+    while True:
+        try:
+            await asyncio.sleep(
+                CHAT_MEMORY_CLEANUP_INTERVAL_SECONDS
+            )
+
+            await cleanup_expired_chat_messages()
+
+        except asyncio.CancelledError:
+            logger.info(
+                "Chat-memory cleanup loop stopped."
+            )
+            raise
+
+        except Exception:
+            logger.exception(
+                "Unexpected chat-memory cleanup-loop error."
+            )
+
+            # Avoid a tight error loop if the database is temporarily down.
+            await asyncio.sleep(60)
+
+
+def _trim_history_for_context(
+    messages: List[Dict[str, str]],
+) -> List[Dict[str, str]]:
+    """
+    Keep the newest history that fits inside the configured character
+    budget. The final order remains oldest -> newest.
+    """
+    selected_reversed: List[Dict[str, str]] = []
+    used_characters = 0
+
+    for item in reversed(messages):
+        role = str(
+            item.get("role", "")
+        ).strip()
+
+        content = str(
+            item.get("content", "")
+        ).strip()
+
+        if role not in {
+            "user",
+            "assistant",
+        }:
+            continue
+
+        if not content:
+            continue
+
+        content = content[
+            :MAX_STORED_MESSAGE_CHARACTERS
+        ]
+
+        projected_size = (
+            used_characters
+            + len(content)
+        )
+
+        if (
+            projected_size
+            > MAX_HISTORY_CHARACTERS
+        ):
+            # Stop here so context stays as one contiguous recent
+            # conversation instead of skipping a newer message and
+            # including an older unrelated one.
+            break
+
+        selected_reversed.append(
+            {
+                "role": role,
+                "content": content,
+            }
+        )
+
+        used_characters = projected_size
+
+    selected_reversed.reverse()
+
+    return selected_reversed
+
+
+async def load_chat_history(
+    tg_user_id: int,
+    chat_id: int,
+) -> List[Dict[str, str]]:
+    """
+    Load recent Alice conversation history for exactly one user inside
+    exactly one Telegram chat.
+
+    A user's private chat, Group A, and Group B therefore all have
+    separate memories.
+    """
+    cutoff = datetime.utcnow() - timedelta(
+        hours=CHAT_MEMORY_HOURS
+    )
+
+    async with AsyncSessionLocal() as session:
+        try:
+            stmt = (
+                select(ChatMessage)
+                .where(
+                    ChatMessage.tg_user_id
+                    == tg_user_id,
+                    ChatMessage.chat_id
+                    == chat_id,
+                    ChatMessage.created_at
+                    >= cutoff,
+                )
+                .order_by(
+                    ChatMessage.created_at.desc(),
+                    ChatMessage.id.desc(),
+                )
+                .limit(MAX_HISTORY_MESSAGES)
+            )
+
+            result = await session.execute(
+                stmt
+            )
+
+            rows = list(
+                result.scalars().all()
+            )
+
+            # Query newest first for efficient LIMIT, then restore
+            # chronological order before sending history to DeepSeek.
+            rows.reverse()
+
+            history = [
+                {
+                    "role": row.role,
+                    "content": row.content,
+                }
+                for row in rows
+            ]
+
+            return _trim_history_for_context(
+                history
+            )
+
+        except Exception:
+            logger.exception(
+                "Failed to load chat memory for user=%s chat=%s.",
+                tg_user_id,
+                chat_id,
+            )
+
+            # Chat must still work even if memory storage is temporarily
+            # unavailable.
+            return []
+
+
+async def save_chat_exchange(
+    tg_user_id: int,
+    chat_id: int,
+    user_text: str,
+    assistant_text: str,
+) -> None:
+    """
+    Save one successful user -> Alice exchange.
+
+    Failed API calls and error messages are intentionally not stored.
+    """
+    clean_user_text = str(
+        user_text
+    ).strip()[
+        :MAX_STORED_MESSAGE_CHARACTERS
+    ]
+
+    clean_assistant_text = str(
+        assistant_text
+    ).strip()[
+        :MAX_STORED_MESSAGE_CHARACTERS
+    ]
+
+    if (
+        not clean_user_text
+        or not clean_assistant_text
+    ):
+        return
+
+    async with AsyncSessionLocal() as session:
+        try:
+            session.add_all(
+                [
+                    ChatMessage(
+                        tg_user_id=tg_user_id,
+                        chat_id=chat_id,
+                        role="user",
+                        content=clean_user_text,
+                    ),
+                    ChatMessage(
+                        tg_user_id=tg_user_id,
+                        chat_id=chat_id,
+                        role="assistant",
+                        content=clean_assistant_text,
+                    ),
+                ]
+            )
+
+            await session.commit()
+
+        except Exception:
+            await session.rollback()
+
+            # Do not make a successful Telegram reply fail just because
+            # temporary memory could not be saved.
+            logger.exception(
+                "Failed to save chat memory for user=%s chat=%s.",
+                tg_user_id,
+                chat_id,
+            )
 
 
 # ============================================================
@@ -276,26 +570,38 @@ def _creator_response(
 
 def _build_chat_payload(
     user_text: str,
+    history: List[Dict[str, str]],
 ) -> dict:
     """
-    Build one DeepSeek chat payload.
+    Build one DeepSeek chat payload with recent conversation memory.
 
     Thinking is intentionally disabled for normal Telegram chat:
     it makes replies faster and prevents the output token budget
     from being consumed by unnecessary reasoning.
     """
+    messages = [
+        {
+            "role": "system",
+            "content": _alice_system_prompt(),
+        }
+    ]
+
+    messages.extend(
+        _trim_history_for_context(
+            history
+        )
+    )
+
+    messages.append(
+        {
+            "role": "user",
+            "content": user_text[:4000],
+        }
+    )
+
     return {
         "model": DEEPSEEK_MODEL,
-        "messages": [
-            {
-                "role": "system",
-                "content": _alice_system_prompt(),
-            },
-            {
-                "role": "user",
-                "content": user_text[:4000],
-            },
-        ],
+        "messages": messages,
         "thinking": {
             "type": "disabled",
         },
@@ -304,8 +610,13 @@ def _build_chat_payload(
     }
 
 
+class EmptyDeepSeekResponseError(Exception):
+    """DeepSeek returned success but no usable assistant content."""
+
+
 async def deepseek_chat(
     user_text: str,
+    history: List[Dict[str, str]],
 ) -> str:
     """
     Send a conversational request to DeepSeek.
@@ -331,7 +642,8 @@ async def deepseek_chat(
         clean_user_text = "Hi Alice."
 
     payload = _build_chat_payload(
-        clean_user_text
+        clean_user_text,
+        history,
     )
 
     logger.info(
@@ -405,9 +717,8 @@ async def deepseek_chat(
 
                             continue
 
-                        return (
-                            "🥱 Alice got an empty response twice. "
-                            "Try again in a moment."
+                        raise EmptyDeepSeekResponseError(
+                            "DeepSeek returned no choices twice."
                         )
 
                     first_choice = choices[0]
@@ -460,9 +771,8 @@ async def deepseek_chat(
 
                             continue
 
-                        return (
-                            "🥱 Alice got an empty response twice. "
-                            "Try again in a moment."
+                        raise EmptyDeepSeekResponseError(
+                            "DeepSeek returned empty content twice."
                         )
 
                     logger.info(
@@ -503,9 +813,8 @@ async def deepseek_chat(
 
                     raise
 
-    return (
-        "🥱 Alice couldn’t get a proper answer. "
-        "Try again in a moment."
+    raise EmptyDeepSeekResponseError(
+        "DeepSeek did not return a usable answer."
     )
 
 
@@ -658,6 +967,7 @@ async def alice_chat(
         return
 
     user_id = message.from_user.id
+    chat_id = message.chat.id
 
     # --------------------------------------------------------
     # Groups and supergroups
@@ -703,19 +1013,45 @@ async def alice_chat(
         return
 
     # --------------------------------------------------------
+    # Load recent 24-hour conversation memory
+    # --------------------------------------------------------
+
+    history = await load_chat_history(
+        tg_user_id=user_id,
+        chat_id=chat_id,
+    )
+
+    logger.info(
+        "Loaded %s memory message(s) for user=%s chat=%s.",
+        len(history),
+        user_id,
+        chat_id,
+    )
+
+    # --------------------------------------------------------
     # Creator questions
     # --------------------------------------------------------
 
     # Answer creator questions locally.
-    # No DeepSeek request is needed for this.
+    # No DeepSeek request is needed for this, but the successful
+    # exchange is still stored so follow-up conversation remains natural.
     if _is_creator_question(
         prompt
     ):
+        reply = _creator_response(
+            prompt
+        )
+
         await _send_with_retry(
             message,
-            _creator_response(
-                prompt
-            ),
+            reply,
+        )
+
+        await save_chat_exchange(
+            tg_user_id=user_id,
+            chat_id=chat_id,
+            user_text=prompt,
+            assistant_text=reply,
         )
 
         return
@@ -726,12 +1062,38 @@ async def alice_chat(
 
     try:
         reply = await deepseek_chat(
-            prompt
+            prompt,
+            history,
+        )
+
+        # Send first. If Telegram delivery fails, do not save a reply
+        # that the user never actually received.
+        await _send_with_retry(
+            message,
+            reply,
+        )
+
+        await save_chat_exchange(
+            tg_user_id=user_id,
+            chat_id=chat_id,
+            user_text=prompt,
+            assistant_text=reply,
+        )
+
+    except EmptyDeepSeekResponseError:
+        logger.warning(
+            "DeepSeek returned no usable chat answer "
+            "for user=%s chat=%s.",
+            user_id,
+            chat_id,
         )
 
         await _send_with_retry(
             message,
-            reply,
+            (
+                "🥱 Alice got an empty AI response twice. "
+                "Try again in a moment."
+            ),
         )
 
     except httpx.HTTPStatusError as exc:
