@@ -1,5 +1,7 @@
 import asyncio
 import logging
+from contextlib import suppress
+from typing import Optional
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -48,6 +50,15 @@ logger = logging.getLogger("LazyAlice")
 
 
 # ============================================================
+# Background tasks
+# ============================================================
+
+chat_memory_cleanup_task: Optional[
+    asyncio.Task
+] = None
+
+
+# ============================================================
 # Database synchronization
 # ============================================================
 
@@ -55,8 +66,11 @@ async def synchronize_database_columns() -> None:
     """
     Keep compatibility with databases created by older versions.
 
-    This is a temporary migration system. For larger future database
-    changes, Alembic migrations should be used.
+    This migration is additive only. It never drops the users table
+    and never resets subscription/account data.
+
+    For larger future database changes, Alembic migrations should
+    eventually replace this temporary migration helper.
     """
     async with AsyncSessionLocal() as session:
         try:
@@ -195,12 +209,29 @@ async def ensure_webhook_disabled(
 async def on_startup(
     bot: Bot,
 ) -> None:
+    global chat_memory_cleanup_task
+
     logger.info(
         "Starting Lazy Alice."
     )
 
+    # create_all() only creates missing tables/indexes.
+    # Existing users/subscriptions remain untouched.
     await init_db()
+
     await synchronize_database_columns()
+
+    # Remove any stale memory left from an older deployment and then
+    # keep cleaning expired chat rows every hour.
+    await chat.cleanup_expired_chat_messages()
+
+    chat_memory_cleanup_task = asyncio.create_task(
+        chat.chat_memory_cleanup_loop()
+    )
+
+    logger.info(
+        "24-hour conversation memory is active."
+    )
 
     database_type = (
         "PostgreSQL"
@@ -236,9 +267,25 @@ async def on_startup(
 async def on_shutdown(
     bot: Bot,
 ) -> None:
+    global chat_memory_cleanup_task
+
     logger.info(
         "Lazy Alice is shutting down."
     )
+
+    if chat_memory_cleanup_task:
+        chat_memory_cleanup_task.cancel()
+
+        with suppress(
+            asyncio.CancelledError
+        ):
+            await chat_memory_cleanup_task
+
+        chat_memory_cleanup_task = None
+
+        logger.info(
+            "Chat-memory cleanup task closed."
+        )
 
 
 # ============================================================
