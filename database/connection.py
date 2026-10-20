@@ -1,38 +1,89 @@
 import os
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from sqlalchemy.orm import DeclarativeBase
+
 from dotenv import load_dotenv
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.orm import DeclarativeBase
+
 
 load_dotenv()
 
-# Railway yoki boshqa Cloud uchun optimal URL
-DB_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./bot_database.db")
 
-# 1. High-Speed Engine Configuration 🚀
-# Biz bu yerda pooling sozlamalarini qo'shdik, shunda bot 10x tezroq javob beradi.
-engine = create_async_engine(
-    DB_URL, 
-    echo=False,
-    pool_size=10,             # Bir vaqtning o'zida 10 ta ulanish tayyor turadi
-    max_overflow=20,          # Zarur bo'lsa yana 20 ta qo'shimcha ulanish ochiladi
-    pool_pre_ping=True,       # Ulanish o'lib qolmaganini doim tekshirib turadi
-    pool_recycle=3600         # Har soatda ulanishlarni yangilab turadi
+# Railway or other cloud database URL.
+DB_URL = os.getenv(
+    "DATABASE_URL",
+    "sqlite+aiosqlite:///./bot_database.db",
 )
 
-# 2. Session Factory
-AsyncSessionLocal = async_sessionmaker(
-    bind=engine,
-    class_=AsyncSession,
-    expire_on_commit=False
-)
 
-# 3. Base Class
+# ============================================================
+# Base class
+# ============================================================
+
 class Base(DeclarativeBase):
     pass
 
-# 4. Database Initialization
-async def init_db():
-    # Alice o'z xotirasini bot ishga tushgan zahoti tayyorlaydi 🥱
+
+# ============================================================
+# Engine
+# ============================================================
+
+# PostgreSQL benefits from an explicit connection pool.
+# Keep SQLite fallback simple because pool_size/max_overflow are
+# not appropriate for every SQLite async pool implementation.
+engine_options = {
+    "echo": False,
+    "pool_pre_ping": True,
+}
+
+if not DB_URL.startswith("sqlite"):
+    engine_options.update(
+        {
+            "pool_size": 10,
+            "max_overflow": 20,
+            "pool_recycle": 3600,
+        }
+    )
+
+
+engine = create_async_engine(
+    DB_URL,
+    **engine_options,
+)
+
+
+# ============================================================
+# Session factory
+# ============================================================
+
+AsyncSessionLocal = async_sessionmaker(
+    bind=engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+)
+
+
+# ============================================================
+# Database initialization
+# ============================================================
+
+async def init_db() -> None:
+    """
+    Create only missing database tables/indexes.
+
+    IMPORTANT:
+    create_all() is additive here. It does NOT drop or recreate the
+    existing users table, subscriptions, expiry dates, templates, etc.
+    """
+
+    # Make absolutely sure every SQLAlchemy model is registered in
+    # Base.metadata before create_all() runs.
+    from . import models  # noqa: F401
+
     async with engine.begin() as conn:
-        # Bu qator jadvallarni (User modeli kabi) avtomatik yaratadi
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(
+            Base.metadata.create_all
+        )
