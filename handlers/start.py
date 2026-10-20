@@ -26,23 +26,29 @@ logger = logging.getLogger("LazyAlice.Start")
 PRIVACY_TEXT = (
     "🔒 <b>Lazy Alice Privacy & Data Policy</b>\n\n"
 
-    "1. <b>No Data Retention:</b> "
-    "We do not store the content of your Rate Confirmations. "
-    "Once the text is extracted and processed, the document data "
-    "is not saved as part of your account.\n\n"
+    "1. <b>Rate Confirmation Data:</b> "
+    "We do not keep the content of your Rate Confirmations as part "
+    "of your account. Extracted document data is used to process your "
+    "request and is not added to Alice's chat memory.\n\n"
 
     "2. <b>Temporary PDF Processing:</b> "
     "PDF files are used only while Alice processes your request "
     "and are removed from temporary processing storage afterward.\n\n"
 
-    "3. <b>Security:</b> "
-    "Your load data is never sold. "
-    "Your Telegram ID is used for account, subscription, "
-    "settings, and usage management.\n\n"
+    "3. <b>24-Hour Chat Memory:</b> "
+    "Normal text conversations with Alice may be temporarily stored "
+    "for up to 24 hours so Alice can understand follow-up messages "
+    "and continue the conversation naturally. Messages older than "
+    "24 hours are automatically deleted.\n\n"
 
-    "4. <b>AI Processing:</b> "
-    "Alice uses an external AI service to analyze Rate Confirmations "
-    "and create structured load information.\n\n"
+    "4. <b>Security:</b> "
+    "Your load data is never sold. "
+    "Your Telegram ID is used for account, subscription, settings, "
+    "usage management, and temporary conversation memory.\n\n"
+
+    "5. <b>AI Processing:</b> "
+    "Alice uses an external AI service to analyze requests and "
+    "generate responses.\n\n"
 
     "<i>By using Alice, you agree to these terms.</i> 💅🥱"
 )
@@ -672,6 +678,10 @@ async def cmd_help(
         "🌡 <b>Reefer Loads</b>\n"
         "Temperature information is detected automatically "
         "when it is actually stated in the Rate Confirmation.\n\n"
+
+        "💬 <b>Follow-up Chat</b>\n"
+        "Alice remembers your recent conversation for up to 24 hours "
+        "so you can ask natural follow-up questions.\n\n"
 
         "💎 <b>Account</b>\n"
         "/plans — View Pro plans\n"
